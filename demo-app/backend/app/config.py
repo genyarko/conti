@@ -2,10 +2,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Annotated
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -40,8 +42,12 @@ class Settings(BaseSettings):
     )
 
     # --- CORS ---
-    cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:5173", "http://localhost:3000"],
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "https://conti-nu.vercel.app",
+            "http://localhost:5173",
+            "http://localhost:3000",
+        ],
         alias="CORS_ORIGINS",
     )
 
@@ -60,7 +66,11 @@ class Settings(BaseSettings):
     @classmethod
     def _split_csv(cls, v):
         if isinstance(v, str):
-            return [o.strip() for o in v.split(",") if o.strip()]
+            s = v.strip()
+            if s.startswith("["):
+                import json
+                return json.loads(s)
+            return [o.strip() for o in s.split(",") if o.strip()]
         return v
 
 
