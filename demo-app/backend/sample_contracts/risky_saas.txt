@@ -1,0 +1,33 @@
+SAAS SUBSCRIPTION AGREEMENT
+
+This SaaS Subscription Agreement ("Agreement") is made effective as of February 1, 2026 between Nimbus Cloud Services, Inc. ("Provider") and the customer identified on the Order Form ("Customer").
+
+1. Service
+Provider will make its hosted software platform (the "Service") available to Customer during the Subscription Term. Provider may, at any time and without notice, modify, suspend, degrade, or discontinue any feature of the Service, at its sole discretion.
+
+2. Fees and Payment
+Customer shall pay the subscription fees set forth in the applicable Order Form. All fees are non-refundable under any circumstances. Provider may increase the subscription fees at any time upon ten (10) days' written notice, including during the initial term. Invoices are due net fifteen (15) days; any late payment accrues interest at 1.75% per month and entitles Provider to suspend the Service without further notice.
+
+3. Term and Auto-Renewal
+The initial subscription term is twelve (12) months and shall automatically renew for successive twelve (12) month terms unless Customer provides written notice of non-renewal at least ninety (90) days prior to the expiration of the then-current term. Upon any renewal, the subscription fees may increase by up to 15% without additional notice beyond the general price-change notice in Section 2.
+
+4. Data
+Customer grants Provider a perpetual, irrevocable, worldwide, royalty-free license to use, reproduce, modify, and create derivative works of Customer Data for any purpose, including training Provider's artificial intelligence models and sublicensing to third parties. Provider may retain Customer Data indefinitely, including after termination.
+
+5. Service Levels
+Provider will use commercially reasonable efforts to keep the Service available. No uptime, latency, throughput, or availability commitment is made, and Provider disclaims any liability for downtime, data loss, or degraded performance. Customer's sole remedy for any service interruption is to continue paying the subscription fees.
+
+6. Limitation of Liability
+IN NO EVENT SHALL PROVIDER'S TOTAL LIABILITY UNDER THIS AGREEMENT EXCEED ONE HUNDRED U.S. DOLLARS ($100), REGARDLESS OF THE CAUSE OF ACTION OR THEORY OF LIABILITY. PROVIDER SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES OF ANY KIND.
+
+7. Indemnification
+Customer shall defend, indemnify, and hold harmless Provider, its affiliates, officers, employees, agents, and contractors from and against any and all claims, liabilities, damages, losses, costs, and expenses (including reasonable attorneys' fees) arising out of or related to Customer's use of the Service or Customer Data. Provider has no reciprocal indemnification obligation to Customer.
+
+8. Termination
+Provider may terminate this Agreement or suspend the Service at any time, for any reason or no reason, with or without notice. Upon termination by Provider for Customer's breach, all prepaid fees are forfeited and Customer remains liable for the remainder of the subscription term.
+
+9. Governing Law and Arbitration
+This Agreement shall be governed by the laws of the State of California. Any dispute arising under this Agreement shall be resolved exclusively by binding arbitration administered in San Francisco, California under the rules of JAMS. Customer waives any right to a jury trial and to participate in a class action.
+
+10. Entire Agreement
+This Agreement, together with any Order Form, constitutes the entire agreement between the parties and supersedes all prior or contemporaneous agreements, whether written or oral.

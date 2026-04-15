@@ -1,0 +1,48 @@
+PROFESSIONAL SERVICES AGREEMENT
+
+This Professional Services Agreement ("Agreement") is entered into as of March 3, 2026 ("Effective Date") by and between Meridian Consulting LLC, a New York limited liability company ("Consultant"), and Harborline Retail, Inc., a Delaware corporation ("Client"). Consultant and Client are each a "Party" and collectively the "Parties."
+
+1. Services
+Consultant shall provide the professional services described in one or more Statements of Work ("SOW") executed by both Parties and incorporated by reference into this Agreement. Each SOW shall specify the scope, deliverables, timeline, fees, and any additional terms. In the event of a conflict between this Agreement and an SOW, this Agreement controls unless the SOW expressly states otherwise.
+
+2. Fees and Payment
+Client shall pay Consultant the fees set forth in each SOW. Consultant shall invoice Client monthly in arrears, and invoices are due within thirty (30) days of receipt. Undisputed amounts not paid within the payment period accrue interest at the lesser of 1.0% per month or the maximum rate permitted by applicable law. Client may in good faith dispute any invoiced amount by providing written notice within fifteen (15) days of receipt; disputed amounts shall not accrue interest while a dispute is pending and under active negotiation.
+
+3. Term and Termination
+This Agreement commences on the Effective Date and continues until terminated in accordance with this Section. Either Party may terminate this Agreement or any SOW for convenience upon thirty (30) days' prior written notice. Either Party may terminate this Agreement immediately upon written notice if the other Party materially breaches this Agreement and fails to cure the breach within fifteen (15) days after written notice of such breach. Upon termination, Client shall pay Consultant for all services performed and non-cancelable expenses incurred through the effective date of termination.
+
+4. Confidentiality
+Each Party (the "Receiving Party") agrees to hold in confidence all non-public information disclosed by the other Party (the "Disclosing Party") that is marked as confidential or would reasonably be understood to be confidential ("Confidential Information"). The Receiving Party shall use Confidential Information solely to perform its obligations under this Agreement and shall protect it using at least the same degree of care it uses to protect its own confidential information, but in no event less than a reasonable standard of care. Confidentiality obligations survive for three (3) years following termination. Confidential Information does not include information that: (a) is or becomes publicly available through no fault of the Receiving Party; (b) was rightfully in the Receiving Party's possession prior to disclosure; (c) is independently developed without use of Confidential Information; or (d) is rightfully obtained from a third party without a confidentiality obligation.
+
+5. Intellectual Property
+Each Party retains ownership of its pre-existing intellectual property. Deliverables created specifically for Client under an SOW ("Deliverables") are assigned to Client upon full payment of the related fees, excluding any Consultant pre-existing materials incorporated therein, which are licensed to Client on a non-exclusive, perpetual, royalty-free basis solely for Client's internal business use of the Deliverables.
+
+6. Warranties
+Consultant warrants that (a) it has full right and authority to enter into this Agreement and perform the services, (b) the services will be performed in a professional and workmanlike manner consistent with industry standards, and (c) the Deliverables will conform in all material respects to the specifications in the applicable SOW for ninety (90) days following delivery. As Client's sole remedy for breach of the warranty in clause (c), Consultant shall, at its option, re-perform the non-conforming services or refund the fees paid for the non-conforming Deliverables.
+
+7. Indemnification
+Each Party (the "Indemnifying Party") shall defend, indemnify, and hold harmless the other Party, its affiliates, and their respective officers, directors, employees, and agents from and against any third-party claims, and related losses, arising out of (a) the Indemnifying Party's gross negligence or willful misconduct, or (b) the Indemnifying Party's infringement of a third party's intellectual property rights, in each case except to the extent caused by the indemnified Party. The indemnified Party shall promptly notify the Indemnifying Party of any claim and provide reasonable cooperation in the defense.
+
+8. Limitation of Liability
+Except for liabilities arising out of a Party's indemnification obligations, breach of confidentiality, or gross negligence or willful misconduct, each Party's total aggregate liability under this Agreement shall not exceed the fees paid or payable by Client to Consultant during the twelve (12) months preceding the event giving rise to the claim. Neither Party shall be liable for any indirect, incidental, special, consequential, or punitive damages, except where such damages arise from a Party's breach of its confidentiality or indemnification obligations.
+
+9. Data Protection
+To the extent Consultant processes personal data on behalf of Client, the Parties shall execute a mutually acceptable data processing addendum that addresses applicable data protection laws, including without limitation the California Consumer Privacy Act and the EU General Data Protection Regulation. Consultant shall implement reasonable administrative, technical, and physical safeguards to protect personal data against unauthorized access, use, or disclosure.
+
+10. Insurance
+Consultant shall maintain, at its own expense, (a) commercial general liability insurance with limits of not less than $2,000,000 per occurrence, (b) professional liability (errors and omissions) insurance with limits of not less than $2,000,000 per claim, and (c) workers' compensation insurance as required by applicable law. Upon Client's written request, Consultant shall provide certificates of insurance evidencing the foregoing coverages.
+
+11. Dispute Resolution
+The Parties shall attempt in good faith to resolve any dispute through escalation to senior executives of each Party. If a dispute is not resolved within thirty (30) days of escalation, either Party may pursue its remedies in the state or federal courts located in New York County, New York, to whose exclusive jurisdiction the Parties consent. Each Party waives any objection based on forum non conveniens.
+
+12. Governing Law
+This Agreement shall be governed by and construed in accordance with the laws of the State of New York, without regard to its conflicts of laws principles.
+
+13. Assignment
+Neither Party may assign this Agreement, in whole or in part, without the other Party's prior written consent, such consent not to be unreasonably withheld; provided, however, that either Party may assign this Agreement without consent in connection with a merger, acquisition, or sale of all or substantially all of its assets, upon written notice to the other Party.
+
+14. Notices
+All notices under this Agreement shall be in writing and delivered by hand, overnight courier, or email (with confirmation of receipt) to the addresses set forth on the signature page. Notices are effective upon receipt.
+
+15. Entire Agreement; Amendments
+This Agreement, together with any SOW executed hereunder, constitutes the entire agreement between the Parties regarding its subject matter and supersedes all prior or contemporaneous agreements. Any amendment must be in writing and signed by an authorized representative of each Party.

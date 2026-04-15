@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink text-slate-100 antialiased;
+  background-image:
+    radial-gradient(circle at 20% 0%, rgba(16, 185, 129, 0.08), transparent 40%),
+    radial-gradient(circle at 80% 10%, rgba(59, 130, 246, 0.08), transparent 45%);
+}
+
+/* Projection-screen bump: demo-day projectors are typically 1080p/4k.
+   Slightly larger base type + tighter max widths keep the UI readable
+   from the back of the room. */
+@media (min-width: 1920px) {
+  html {
+    font-size: 17.5px;
+  }
+}
+
+@media (min-width: 2560px) {
+  html {
+    font-size: 19px;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-panel border border-line rounded-xl;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg
+      bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-500/40
+      disabled:cursor-not-allowed text-slate-900 font-semibold
+      px-5 py-2.5 transition-colors;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg
+      border border-line hover:border-slate-500 text-slate-200
+      px-4 py-2 text-sm transition-colors;
+  }
+  .textarea {
+    @apply w-full min-h-[220px] resize-y rounded-lg bg-surface
+      border border-line focus:border-emerald-400 focus:outline-none
+      focus:ring-2 focus:ring-emerald-500/20 p-4 text-sm leading-relaxed
+      font-mono text-slate-100 placeholder:text-slate-500;
+  }
+}
+
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(30, 41, 59, 0.6) 0%,
+    rgba(51, 65, 85, 0.8) 50%,
+    rgba(30, 41, 59, 0.6) 100%
+  );
+  background-size: 800px 100%;
+  @apply animate-shimmer rounded;
+}

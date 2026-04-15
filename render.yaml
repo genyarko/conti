@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: trustlayer-engine
+    runtime: python
+    plan: starter
+    rootDir: .
+    buildCommand: pip install -r engine/requirements.txt
+    startCommand: uvicorn engine.app.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-4-6
+      - key: ENGINE_ENV
+        value: production
+      - key: ENGINE_LOG_LEVEL
+        value: INFO
+      - key: CORS_ORIGINS
+        value: "*"
+
+  - type: web
+    name: trustlayer-contract-demo
+    runtime: python
+    plan: starter
+    rootDir: .
+    buildCommand: pip install -r demo-app/backend/requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --app-dir demo-app/backend
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-4-6
+      - key: TRUSTLAYER_BASE_URL
+        fromService:
+          type: web
+          name: trustlayer-engine
+          property: hostport
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: DEMO_LOG_LEVEL
+        value: INFO

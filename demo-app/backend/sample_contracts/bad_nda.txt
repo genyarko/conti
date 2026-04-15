@@ -1,0 +1,43 @@
+MUTUAL NON-DISCLOSURE AGREEMENT
+
+This Non-Disclosure Agreement ("Agreement") is entered into as of January 15, 2026 ("Effective Date") by and between Acme Innovations, Inc., a Delaware corporation ("Discloser"), and the undersigned individual or entity ("Recipient"). Although captioned as "mutual," the obligations below run only from Recipient to Discloser.
+
+1. Definition of Confidential Information
+"Confidential Information" means any and all information disclosed by Discloser to Recipient, in any form, whether marked as confidential or not, and including all information Recipient may independently learn about Discloser, its affiliates, employees, or customers. Confidential Information also includes any conclusions, ideas, or derivative works that Recipient develops during or after any interaction with Discloser, regardless of whether such information originated with Discloser.
+
+2. Obligations of Recipient
+Recipient shall hold all Confidential Information in strict confidence and shall not disclose it to any third party, including Recipient's own legal counsel or tax advisors, without Discloser's prior written consent. Recipient shall use Confidential Information solely for the purpose of evaluating a potential business relationship with Discloser, which purpose shall be defined unilaterally by Discloser from time to time.
+
+3. Term
+The obligations of confidentiality under this Agreement shall survive in perpetuity. There is no termination date and no sunset provision. Recipient's obligations shall bind Recipient's heirs, successors, and assigns forever.
+
+4. Return of Materials
+Upon Discloser's request, Recipient shall immediately return or destroy all Confidential Information, including Recipient's own notes, analyses, and work product derived from or referring to the Confidential Information. Recipient shall certify destruction in writing within 24 hours of any request.
+
+5. No Warranty
+Discloser makes no representations or warranties regarding the Confidential Information. All Confidential Information is provided "AS IS."
+
+6. Remedies
+Recipient acknowledges that any breach of this Agreement will cause Discloser irreparable harm for which monetary damages would be inadequate. In the event of any alleged breach, Discloser shall be entitled to (a) immediate injunctive relief without the posting of any bond, (b) liquidated damages of $500,000 per incident, and (c) recovery of all of Discloser's attorneys' fees and costs. Recipient waives any right to contest the reasonableness of such liquidated damages.
+
+7. Governing Law and Jurisdiction
+This Agreement shall be governed by the laws of the State of Delaware. Recipient consents to exclusive personal jurisdiction in the state and federal courts located in Wilmington, Delaware for any dispute arising hereunder and waives any objection based on forum non conveniens, regardless of Recipient's location.
+
+8. Assignment
+Discloser may freely assign this Agreement to any third party without notice to Recipient. Recipient may not assign or delegate any rights or obligations under this Agreement without Discloser's prior written consent, which may be withheld in Discloser's sole discretion for any reason.
+
+9. Entire Agreement
+This Agreement constitutes the entire agreement between the parties regarding its subject matter and supersedes all prior or contemporaneous agreements, communications, and understandings.
+
+10. Signatures
+IN WITNESS WHEREOF, the parties have executed this Agreement as of the Effective Date.
+
+Discloser: Acme Innovations, Inc.
+By: ______________________
+Name:
+Title:
+
+Recipient:
+By: ______________________
+Name:
+Title:
