@@ -52,11 +52,11 @@ class Clause(BaseModel):
 
 class ParsedContract(BaseModel):
     contract_id: str = Field(default_factory=lambda: _new_id("ctr"))
-    filename: str = ""
+    filename: str = Field(default="", max_length=512)
     doc_type: str = Field(default="unknown", description="pdf | docx | txt")
     raw_text: str
-    clauses: list[Clause]
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    clauses: list[Clause] = Field(..., max_length=2000)
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=64)
 
 
 class Finding(BaseModel):
@@ -88,12 +88,13 @@ class VerifiedFinding(BaseModel):
 class AnalyzeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Optional[str] = None
+    contract_id: Optional[str] = Field(default=None, max_length=128)
     text: Optional[str] = Field(
         default=None,
+        max_length=200_000,
         description="Raw contract text. Supply this if you did not use /upload.",
     )
-    filename: Optional[str] = None
+    filename: Optional[str] = Field(default=None, max_length=512)
     skip_verification: bool = Field(
         default=False,
         description="If true, return analyzer findings without calling TrustLayer.",

@@ -54,6 +54,7 @@ class VerifyRequest(BaseModel):
     )
     output_schema: Optional[dict[str, Any]] = Field(
         default=None,
+        max_length=128,
         description="Optional JSON schema describing the expected structure of llm_output.",
     )
 
