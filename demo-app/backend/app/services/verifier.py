@@ -56,6 +56,11 @@ class TrustLayerVerifier:
         self._semaphore = asyncio.Semaphore(
             max_concurrency or settings.max_findings_verified_in_parallel
         )
+        self._auth_headers: dict[str, str] = (
+            {"Authorization": f"Bearer {settings.trustlayer_api_token}"}
+            if settings.trustlayer_api_token
+            else {}
+        )
 
     async def __aenter__(self) -> "TrustLayerVerifier":
         if self._http is None:
@@ -115,6 +120,7 @@ class TrustLayerVerifier:
                 f"{self._base_url}/verify/claims",
                 json=payload,
                 timeout=self._timeout,
+                headers=self._auth_headers or None,
             )
             if resp.status_code >= 400:
                 raise RuntimeError(

@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     trustlayer_timeout_seconds: float = Field(
         default=120.0, alias="TRUSTLAYER_TIMEOUT_SECONDS"
     )
+    # Token this backend presents when calling the engine upstream.
+    trustlayer_api_token: str = Field(default="", alias="TRUSTLAYER_API_TOKEN")
+
+    # --- Auth ---
+    # Token this backend requires from clients on POST /upload, /analyze, and
+    # /samples/{name}/load. Leave empty in dev to disable; required in prod.
+    api_auth_token: str = Field(default="", alias="API_AUTH_TOKEN")
 
     # --- Server ---
     demo_host: str = Field(default="0.0.0.0", alias="DEMO_HOST")

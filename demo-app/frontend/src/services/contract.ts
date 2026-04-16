@@ -7,6 +7,11 @@ import type { ApiError } from "../types/trustlayer";
 
 const BASE_URL =
   import.meta.env.VITE_CONTRACT_API_URL ?? "http://localhost:8100";
+const API_TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
+
+function authHeaders(): Record<string, string> {
+  return API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
+}
 
 export class ContractApiError extends Error {
   constructor(
@@ -41,6 +46,7 @@ export async function uploadFile(
   form.append("file", file);
   const res = await fetch(`${BASE_URL}/upload`, {
     method: "POST",
+    headers: authHeaders(),
     body: form,
     signal,
   });
@@ -58,6 +64,7 @@ export async function uploadText(
   if (filename) form.append("filename", filename);
   const res = await fetch(`${BASE_URL}/upload`, {
     method: "POST",
+    headers: authHeaders(),
     body: form,
     signal,
   });
@@ -76,7 +83,7 @@ export async function analyze(
 ): Promise<AnalyzeResponse> {
   const res = await fetch(`${BASE_URL}/analyze`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
     signal,
   });
@@ -99,6 +106,7 @@ export async function loadSample(
 ): Promise<UploadResponse> {
   const res = await fetch(`${BASE_URL}/samples/${encodeURIComponent(name)}/load`, {
     method: "POST",
+    headers: authHeaders(),
     signal,
   });
   if (!res.ok) throw await parseError(res);

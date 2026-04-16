@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,6 +37,11 @@ async def lifespan(app: FastAPI):
     )
     if not settings.anthropic_api_key:
         log.warning("ANTHROPIC_API_KEY is not set — /analyze will fail.")
+    if not settings.api_auth_token:
+        log.warning(
+            "API_AUTH_TOKEN is not set — /upload, /analyze, /samples/*/load are "
+            "UNAUTHENTICATED. Do not deploy to a public URL without setting this."
+        )
     yield
     log.info("Contract reviewer demo shutting down.")
 
@@ -58,6 +64,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_PROTECTED_POST_PATHS = ("/upload", "/analyze")
+
+
+def _requires_auth(request: Request) -> bool:
+    if request.method != "POST":
+        return False
+    path = request.url.path
+    if any(path.startswith(p) for p in _PROTECTED_POST_PATHS):
+        return True
+    # /samples/{name}/load triggers the store write + downstream pipeline — protect it too.
+    if path.startswith("/samples/") and path.endswith("/load"):
+        return True
+    return False
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if settings.api_auth_token and _requires_auth(request):
+        header = request.headers.get("authorization") or ""
+        scheme, _, presented = header.partition(" ")
+        if scheme.lower() != "bearer" or not presented:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"error": "unauthorized", "message": "Missing Bearer token."},
+                headers={"WWW-Authenticate": 'Bearer realm="contract-demo"'},
+            )
+        if not hmac.compare_digest(presented.strip(), settings.api_auth_token):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"error": "unauthorized", "message": "Invalid API token."},
+                headers={"WWW-Authenticate": 'Bearer realm="contract-demo"'},
+            )
+    return await call_next(request)
 
 
 @app.exception_handler(RequestValidationError)

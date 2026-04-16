@@ -6,3 +6,5 @@ dist-ssr
 .env.local
 *.log
 .DS_Store
+
+.vercel

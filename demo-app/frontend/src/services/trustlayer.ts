@@ -7,6 +7,11 @@ import type {
 
 const BASE_URL =
   import.meta.env.VITE_TRUSTLAYER_API_URL ?? "http://localhost:8000";
+const API_TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
+
+function authHeaders(): Record<string, string> {
+  return API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
+}
 
 export class TrustLayerError extends Error {
   constructor(
@@ -41,7 +46,7 @@ export async function verify(
   const path = mode === "quick" ? "/verify/quick" : "/verify";
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
     signal,
   });

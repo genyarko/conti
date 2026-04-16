@@ -2,7 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_TRUSTLAYER_API_URL?: string;
-  readonly VITE_DEMO_API_URL?: string;
+  readonly VITE_CONTRACT_API_URL?: string;
+  readonly VITE_API_TOKEN?: string;
 }
 
 interface ImportMeta {

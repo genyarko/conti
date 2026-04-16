@@ -44,6 +44,11 @@ class Settings(BaseSettings):
         alias="CORS_ORIGINS",
     )
 
+    # --- Auth ---
+    # When set, POST /verify* requires `Authorization: Bearer <token>`.
+    # Leave empty in dev to disable auth; required in production.
+    api_auth_token: str = Field(default="", alias="API_AUTH_TOKEN")
+
     # --- Rate limiting ---
     rate_limit_per_minute: int = Field(default=60, alias="RATE_LIMIT_PER_MINUTE")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")

@@ -147,3 +147,47 @@
 3. Write GitHub README: project overview, architecture diagram, API docs, setup instructions, screenshots
 4. Create cover image: split-screen showing the playground and contract reviewer
 5. Final submission: GitHub repo URL, live demo URL, video, slides, cover image
+
+### Phase 12: User-Selectable Model (post-demo, ~2 hours)
+
+Goal: let the user choose a Claude model per request (Opus 4.6 / Sonnet 4.6 / Haiku 4.5) so they can trade off cost vs. quality. Server-side default still comes from `ANTHROPIC_MODEL`.
+
+1. **Engine — request schema**
+   - Add `model: Optional[str] = None` to `VerifyRequest`, `VerifyQuickRequest`, `VerifyClaimsRequest` in `engine/app/models/schemas.py`.
+   - Validate against a whitelist in one place (`engine/app/services/models.py`): `ALLOWED_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"}`. Reject unknown IDs with 400 + helpful error.
+
+2. **Engine — pipeline plumbing**
+   - Thread `model` through `VerifyPipeline.run(...)` down to the Anthropic call sites in `extractor.py`, `grounder.py`, `consistency.py`. Fall back to `settings.anthropic_model` when `None`.
+   - No separate "fast model" override needed — the single `model` arg governs the whole pipeline for that request.
+   - Include the resolved model in `ReportMetadata.model` (already the field, just ensure it reflects the request-scoped choice, not the default).
+
+3. **Engine — catalog endpoint**
+   - Add `GET /models` returning `[{id, label, tier: "flagship"|"balanced"|"fast", input_price_per_mtok, output_price_per_mtok}]` so the frontend has a single source of truth and the dropdown stays in sync with backend whitelist.
+
+4. **Demo backend — same treatment**
+   - Add optional `model` to `AnalyzeRequest`. Thread it into `AnalysisPipeline` → analyzer LLM call + every `/verify` call it makes to the engine. When absent, use the backend's `ANTHROPIC_MODEL`.
+   - Expose the same `/models` proxy so the frontend can call one URL regardless of which tab it's on.
+
+5. **Frontend — selector**
+   - New `components/ModelSelector.tsx`: small dropdown with tier labels and a "per 1M tokens" price hint. Fetch options from `/models` on mount; cache in `useMemo` + `localStorage`.
+   - Persist the user's pick in `localStorage.trustlayer.model`. Default to `claude-haiku-4-5-20251001` for cost safety.
+
+6. **Frontend — wire into hooks**
+   - `useVerify`: accept `model` param, include in `VerifyRequest` body.
+   - `useContract.analyzeNow`: accept `model`, pass through to `/analyze`.
+   - Surface the selector in both views' action rows (next to the "Verify" / "Review" button) so the user sees the cost implication at the point of action.
+
+7. **Frontend — show what ran**
+   - In `ReportSummary` metadata row and `ContractSummary`, display the model badge (e.g. "Haiku 4.5 · fast") tied to `metadata.model`, so the user can confirm the pipeline used their pick.
+
+8. **Cost guardrail (nice-to-have)**
+   - If Opus is selected, show a small "~15× more expensive than Haiku" tooltip on the button.
+   - Optional: add `DAILY_OPUS_BUDGET_USD` env var; engine rejects Opus requests once exceeded and falls back to Sonnet with a warning in the response metadata.
+
+9. **Tests**
+   - Engine: parametrized tests that `/verify` honors a request-scoped `model` and that an unknown model returns 400.
+   - Frontend: hook tests asserting the selected model is included in the request body and persisted across reloads.
+
+10. **Docs**
+    - Update `engine/API.md`: document the `model` field and the `/models` endpoint.
+    - Update the main `README.md` and this file's Phase 6 notes once shipped.

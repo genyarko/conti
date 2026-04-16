@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -47,6 +48,11 @@ async def lifespan(app: FastAPI):
     )
     if not settings.anthropic_api_key:
         log.warning("ANTHROPIC_API_KEY is not set — pipeline calls will fail.")
+    if not settings.api_auth_token:
+        log.warning(
+            "API_AUTH_TOKEN is not set — /verify endpoints are UNAUTHENTICATED. "
+            "Do not deploy to a public URL without setting this."
+        )
     yield
     log.info("TrustLayer engine shutting down.")
 
@@ -79,6 +85,30 @@ def _client_key(request: Request) -> str:
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def _requires_auth(request: Request) -> bool:
+    return request.method == "POST" and request.url.path.startswith("/verify")
+
+
+def _unauthorized(message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"error": "unauthorized", "message": message},
+        headers={"WWW-Authenticate": 'Bearer realm="trustlayer"'},
+    )
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if settings.api_auth_token and _requires_auth(request):
+        header = request.headers.get("authorization") or ""
+        scheme, _, presented = header.partition(" ")
+        if scheme.lower() != "bearer" or not presented:
+            return _unauthorized("Missing Bearer token.")
+        if not hmac.compare_digest(presented.strip(), settings.api_auth_token):
+            return _unauthorized("Invalid API token.")
+    return await call_next(request)
 
 
 @app.middleware("http")
