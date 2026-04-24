@@ -57,15 +57,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
-)
-
-
 _PROTECTED_POST_PATHS = ("/upload", "/analyze")
 
 
@@ -99,6 +90,17 @@ async def auth_middleware(request: Request, call_next):
                 headers={"WWW-Authenticate": 'Bearer realm="contract-demo"'},
             )
     return await call_next(request)
+
+
+# Registered last so it wraps auth_middleware — short-circuit responses
+# (e.g. 401 from auth) still get Access-Control-Allow-Origin headers.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 
 @app.exception_handler(RequestValidationError)

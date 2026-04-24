@@ -103,15 +103,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
-)
-
-
 def _client_key(request: Request) -> str:
     client_host = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for")
@@ -199,6 +190,17 @@ async def timing_and_rate_limit_middleware(request: Request, call_next):
         usage=getattr(request.state, "metrics_usage", None),
     )
     return response
+
+
+# Registered last so it wraps auth + timing middlewares — short-circuit
+# responses (e.g. 401, 429) still get Access-Control-Allow-Origin headers.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 
 def _record_metrics(
