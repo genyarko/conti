@@ -77,3 +77,28 @@ CORS_ORIGINS=https://trustlayer.vercel.app,https://www.your-domain.com
   `Procfile` in each backend directory and set `ANTHROPIC_API_KEY`.
 - **Self-hosted**: `uvicorn engine.app.main:app` from the repo root for the
   engine, and `uvicorn app.main:app --app-dir demo-app/backend` for the demo.
+
+
+## Troubleshooting common deploy errors
+
+### Vercel `GET /` returns 404
+
+If Vercel logs show intermittent `GET /` 404s (for example after previously seeing 200),
+check these first:
+
+1. **Root Directory** must be `demo-app/frontend` (not repo root).
+2. Confirm the deployment includes `dist/index.html` in build artifacts.
+3. Keep SPA fallback rewrite enabled (`/(.*)` -> `/index.html`) so client routes do not 404.
+
+### Browser console messages that are usually unrelated to your app
+
+These messages are commonly emitted by Chrome extensions and can be ignored while
+triaging app deploys:
+
+- `Unchecked runtime.lastError: No tab with id ...`
+- `A listener indicated an asynchronous response ...`
+- `lockdown-install.js` / `contentScript.bundle.js` references
+
+A missing `/favicon.ico` is harmless but noisy; this repo maps `/favicon.ico` to
+`/favicon.svg` in Vercel to avoid that 404 in browser consoles.
+
