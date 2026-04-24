@@ -56,6 +56,15 @@ class Settings(BaseSettings):
             "X-Forwarded-For. If empty, X-Forwarded-For is ignored."
         ),
     )
+    trust_proxy_headers: bool = Field(
+        default=False,
+        alias="TRUST_PROXY_HEADERS",
+        description=(
+            "When true, trust X-Forwarded-For unconditionally — only safe on "
+            "PaaS providers (e.g. Render) where every inbound request is "
+            "guaranteed to traverse the platform proxy. Off by default."
+        ),
+    )
 
     # --- Rate limiting ---
     rate_limit_per_minute: int = Field(default=10, alias="RATE_LIMIT_PER_MINUTE")

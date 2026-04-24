@@ -115,8 +115,10 @@ app.add_middleware(
 def _client_key(request: Request) -> str:
     client_host = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for")
-    trusted = set(settings.trusted_proxy_ips)
-    if fwd and client_host in trusted:
+    if fwd and (
+        settings.trust_proxy_headers
+        or client_host in set(settings.trusted_proxy_ips)
+    ):
         return fwd.split(",")[0].strip()
     return client_host
 
