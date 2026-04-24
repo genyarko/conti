@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -67,30 +67,27 @@ class AuditLog:
         if not self._enabled or not self._path.exists():
             return []
         limit = max(1, min(int(limit), 10_000))
-        with self._lock:
-            raw = self._path.read_bytes()
-        if not raw:
+        out: deque[dict[str, Any]] = deque(maxlen=limit)
+        try:
+            f = self._path.open("r", encoding="utf-8")
+        except OSError:
             return []
-        out: list[dict[str, Any]] = []
-        # Walk lines newest→oldest; stop once we've collected `limit` matches.
-        for line in reversed(raw.splitlines()):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                continue
-            if endpoint and record.get("endpoint") != endpoint:
-                continue
-            if since is not None:
-                ts = _parse_iso(record.get("timestamp"))
-                if ts is None or ts < since:
+        with f:
+            for line in f:
+                if not line.strip():
                     continue
-            out.append(record)
-            if len(out) >= limit:
-                break
-        out.reverse()
-        return out
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if endpoint and record.get("endpoint") != endpoint:
+                    continue
+                if since is not None:
+                    ts = _parse_iso(record.get("timestamp"))
+                    if ts is None or ts < since:
+                        continue
+                out.append(record)
+        return list(out)
 
     def clear(self) -> None:
         if not self._enabled:

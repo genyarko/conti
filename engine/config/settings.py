@@ -45,9 +45,17 @@ class Settings(BaseSettings):
     )
 
     # --- Auth ---
-    # When set, POST /verify* requires `Authorization: Bearer <token>`.
+    # When set, all non-public data endpoints require `Authorization: Bearer <token>`.
     # Leave empty in dev to disable auth; required in production.
     api_auth_token: str = Field(default="", alias="API_AUTH_TOKEN")
+    trusted_proxy_ips: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        alias="TRUSTED_PROXY_IPS",
+        description=(
+            "Client IPs of reverse proxies that are allowed to supply "
+            "X-Forwarded-For. If empty, X-Forwarded-For is ignored."
+        ),
+    )
 
     # --- Rate limiting ---
     rate_limit_per_minute: int = Field(default=10, alias="RATE_LIMIT_PER_MINUTE")
@@ -91,7 +99,7 @@ class Settings(BaseSettings):
         default=50, alias="HALLUCINATION_GROUNDING_MAX"
     )
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "trusted_proxy_ips", mode="before")
     @classmethod
     def _split_csv(cls, v):
         if isinstance(v, str):
