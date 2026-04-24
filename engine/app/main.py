@@ -113,14 +113,19 @@ app.add_middleware(
 
 
 def _client_key(request: Request) -> str:
+    client_host = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for")
-    if fwd:
+    trusted = set(settings.trusted_proxy_ips)
+    if fwd and client_host in trusted:
         return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return client_host
 
 
 def _requires_auth(request: Request) -> bool:
-    return request.method == "POST" and request.url.path.startswith("/verify")
+    path = request.url.path
+    if path in {"/", "/health", "/docs", "/openapi.json", "/redoc"}:
+        return False
+    return path.startswith(("/verify", "/audit", "/stats"))
 
 
 def _unauthorized(message: str) -> JSONResponse:
@@ -850,7 +855,7 @@ async def _process_batch_item(
                 status="error",
                 error=BatchItemError(
                     code=type(exc).__name__,
-                    message=str(exc) or "unexpected error",
+                    message="Batch item processing failed.",
                 ),
             )
 

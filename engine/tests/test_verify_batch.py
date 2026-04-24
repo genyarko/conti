@@ -218,7 +218,7 @@ def test_batch_isolates_per_item_failures(monkeypatch):
     for item in body["results"]:
         assert item["status"] == "error"
         assert item["error"]["code"] == "RuntimeError"
-        assert "stubbed failure" in item["error"]["message"]
+        assert item["error"]["message"] == "Batch item processing failed."
 
 
 def test_batch_counts_hallucination_items(monkeypatch):
