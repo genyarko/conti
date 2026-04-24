@@ -122,6 +122,8 @@ class ReportMetadata(BaseModel):
     consistency_ms: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
     claim_count: int = 0
 
 
@@ -133,3 +135,119 @@ class IntegrityReport(BaseModel):
     hallucinations: list[ClaimVerdict] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
     metadata: ReportMetadata
+
+
+class VerifyBatchItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_context: str = Field(..., min_length=1)
+    llm_output: str = Field(..., min_length=1)
+
+
+class VerifyBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[VerifyBatchItem] = Field(..., min_length=1)
+    mode: str = Field(
+        default="full",
+        pattern="^(full|quick)$",
+        description="Verification mode per item: 'full' runs the consistency stage; 'quick' is grounding-only.",
+    )
+
+
+class BatchItemError(BaseModel):
+    code: str
+    message: str
+
+
+class BatchItemResult(BaseModel):
+    index: int
+    status: str = Field(..., pattern="^(ok|error)$")
+    report: Optional[IntegrityReport] = None
+    error: Optional[BatchItemError] = None
+
+
+class BatchRollup(BaseModel):
+    item_count: int
+    ok_count: int
+    error_count: int
+    hallucination_item_count: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
+    estimated_cost_usd: float
+    duration_ms: int
+    concurrency: int
+    mode: str
+
+
+class VerifyBatchReport(BaseModel):
+    rollup: BatchRollup
+    results: list[BatchItemResult]
+
+
+class TraceClaimEvidence(BaseModel):
+    """Per-claim evidence captured during verification.
+
+    Bundles the grounding passage and location, the raw consistency reasoning,
+    and any internal-contradiction links — i.e. the material the pipeline
+    produced while computing the report but that `ClaimVerdict` flattens away.
+    """
+
+    claim_id: str
+    text: str
+    category: ClaimCategory
+    output_quote: Optional[str] = None
+    grounding_score: int
+    grounding_level: GroundingLevel
+    matched_passage: Optional[str] = None
+    match_location: Optional[tuple[int, int]] = None
+    grounding_reasoning: str = ""
+    used_semantic_fallback: bool = False
+    consistency_verdict: ConsistencyVerdict
+    source_consistent: bool
+    internal_consistent: bool
+    confidence: int
+    consistency_reasoning: str = ""
+    contradicts: list[str] = Field(default_factory=list)
+
+
+class VerifyTrace(BaseModel):
+    """Explainability artifact for a single verify call.
+
+    Keyed by `request_id`, returned by `GET /verify/trace/{request_id}`.
+    """
+
+    request_id: str
+    endpoint: str
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(tz=timezone.utc)
+    )
+    report: IntegrityReport
+    evidence: list[TraceClaimEvidence] = Field(default_factory=list)
+
+
+class AuditEvent(BaseModel):
+    """A single audit record as returned by `GET /audit/events`."""
+
+    request_id: str
+    timestamp: str
+    endpoint: str
+    model: str
+    status_code: int
+    latency_ms: int
+    overall_score: Optional[int] = None
+    claim_count: int = 0
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    batch_id: Optional[str] = None
+    batch_index: Optional[int] = None
+    error: Optional[str] = None
+
+
+class AuditEventsResponse(BaseModel):
+    count: int
+    events: list[AuditEvent]

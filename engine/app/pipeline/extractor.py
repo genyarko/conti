@@ -4,14 +4,17 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
-
-from anthropic import AsyncAnthropic
+from typing import Any, Optional
 
 from engine.app.models.schemas import Claim, ClaimCategory
 from engine.app.prompts.extractor_prompt import (
     EXTRACTOR_SYSTEM_PROMPT,
     build_user_prompt,
+)
+from engine.app.services.anthropic_client import (
+    AnthropicClient,
+    ClaudeClient as _ClaudeClient,
+    TokenLedger,
 )
 from engine.config import settings
 
@@ -26,51 +29,16 @@ _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
-class _ClaudeClient(Protocol):
-    async def create_message(
-        self,
-        *,
-        system: str,
-        user: str,
-        model: str,
-        max_tokens: int,
-    ) -> str: ...
-
-
-@dataclass
-class AnthropicClient:
-    """Thin wrapper so tests can substitute a fake without touching the SDK."""
-
-    api_key: str
-    _client: Optional[AsyncAnthropic] = None
-
-    def __post_init__(self) -> None:
-        if not self.api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is required for the extractor.")
-        self._client = AsyncAnthropic(api_key=self.api_key)
-
-    async def create_message(
-        self,
-        *,
-        system: str,
-        user: str,
-        model: str,
-        max_tokens: int,
-    ) -> str:
-        assert self._client is not None
-        resp = await self._client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        # Concatenate all text blocks in the response.
-        parts: list[str] = []
-        for block in resp.content:
-            text = getattr(block, "text", None)
-            if text:
-                parts.append(text)
-        return "".join(parts)
+__all__ = [
+    "AnthropicClient",
+    "CHUNK_CHAR_LIMIT",
+    "ClaimExtractor",
+    "ExtractionResult",
+    "_chunk_output",
+    "_looks_like_structured",
+    "_parse_claims_payload",
+    "extract_claims",
+]
 
 
 def _looks_like_structured(output: str) -> bool:
@@ -167,10 +135,12 @@ class ClaimExtractor:
         *,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        ledger: Optional[TokenLedger] = None,
     ) -> None:
         self._client = client or AnthropicClient(api_key=settings.anthropic_api_key)
         self._model = model or settings.anthropic_fast_model
         self._max_tokens = max_tokens or settings.anthropic_max_tokens
+        self._ledger = ledger
 
     async def extract(self, llm_output: str) -> ExtractionResult:
         if not llm_output or not llm_output.strip():
@@ -197,6 +167,8 @@ class ClaimExtractor:
                 model=self._model,
                 max_tokens=self._max_tokens,
             )
+            if self._ledger is not None:
+                self._ledger.record_from(self._client)
             raw_responses.append(raw)
             payload = _parse_claims_payload(raw)
             for item in payload:

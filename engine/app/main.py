@@ -1,25 +1,42 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from engine.app.models.schemas import (
+    AuditEvent,
+    AuditEventsResponse,
+    BatchItemError,
+    BatchItemResult,
+    BatchRollup,
     Claim,
     ClaimInput,
     IntegrityReport,
+    TraceClaimEvidence,
+    VerifyBatchItem,
+    VerifyBatchReport,
+    VerifyBatchRequest,
     VerifyClaimsRequest,
     VerifyQuickRequest,
     VerifyRequest,
+    VerifyTrace,
 )
 from engine.app.pipeline.orchestrator import VerifyPipeline
+from engine.app.services.audit import AuditLog, TraceStore, build_verify_record
 from engine.app.services.cache import TTLCache, make_cache_key
+from engine.app.services.metrics import MetricsRegistry
 from engine.app.services.rate_limit import SlidingWindowRateLimiter
 from engine.config import settings
 
@@ -36,6 +53,17 @@ _report_cache: TTLCache[dict] = TTLCache(
 )
 _rate_limiter = SlidingWindowRateLimiter(
     limit_per_minute=settings.rate_limit_per_minute
+)
+_metrics = MetricsRegistry()
+_audit_log = AuditLog(
+    path=Path(settings.audit_path),
+    max_bytes=settings.audit_max_bytes,
+    enabled=settings.audit_enabled,
+)
+_trace_store = TraceStore(
+    ttl_seconds=settings.trace_ttl_seconds,
+    max_entries=settings.trace_max_entries,
+    enabled=settings.trace_enabled,
 )
 
 
@@ -66,6 +94,10 @@ app = FastAPI(
         "- `POST /verify` — full pipeline: extract → ground → consistency → aggregate.\n"
         "- `POST /verify/quick` — grounding-only fast path; skips LLM consistency calls.\n"
         "- `POST /verify/claims` — accepts pre-extracted claims; skips extraction.\n"
+        "- `POST /verify/batch` — run many (source, output) pairs in one call with bounded concurrency.\n"
+        "- `GET /stats` — live latency, throughput, token, and cost metrics.\n"
+        "- `GET /audit/events` — tail of the append-only audit log.\n"
+        "- `GET /verify/trace/{request_id}` — per-claim evidence trace for a prior verification.\n"
     ),
     version="0.2.0",
     lifespan=lifespan,
@@ -111,6 +143,9 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_METRICS_RECORDED_PATHS = ("/verify",)
+
+
 @app.middleware("http")
 async def timing_and_rate_limit_middleware(request: Request, call_next):
     start = time.perf_counter()
@@ -122,6 +157,7 @@ async def timing_and_rate_limit_middleware(request: Request, call_next):
     ):
         allowed, remaining, retry_after = _rate_limiter.check(_client_key(request))
         if not allowed:
+            _record_metrics(request, start_perf=start, status_code=429, usage=None)
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={
@@ -146,7 +182,38 @@ async def timing_and_rate_limit_middleware(request: Request, call_next):
 
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     response.headers["X-Process-Time-Ms"] = str(elapsed_ms)
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+    _record_metrics(
+        request,
+        start_perf=start,
+        status_code=response.status_code,
+        usage=getattr(request.state, "metrics_usage", None),
+    )
     return response
+
+
+def _record_metrics(
+    request: Request,
+    *,
+    start_perf: float,
+    status_code: int,
+    usage: dict | None,
+) -> None:
+    path = request.url.path
+    if request.method != "POST" or not path.startswith(_METRICS_RECORDED_PATHS):
+        return
+    latency_ms = (time.perf_counter() - start_perf) * 1000
+    is_error = status_code >= 400
+    _metrics.record(
+        path,
+        latency_ms=latency_ms,
+        error=is_error,
+        input_tokens=(usage or {}).get("input_tokens", 0),
+        output_tokens=(usage or {}).get("output_tokens", 0),
+        estimated_cost_usd=(usage or {}).get("estimated_cost_usd", 0.0),
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -237,6 +304,109 @@ def _cache_put(key: str, report: IntegrityReport) -> None:
         _report_cache.set(key, report.model_dump(mode="json"))
 
 
+def _stash_usage(http_request: Request, report: IntegrityReport) -> None:
+    http_request.state.metrics_usage = {
+        "input_tokens": report.metadata.input_tokens,
+        "output_tokens": report.metadata.output_tokens,
+        "estimated_cost_usd": report.metadata.estimated_cost_usd,
+    }
+
+
+def _outcome_counts(report: IntegrityReport) -> dict[str, int]:
+    return {
+        "verified": len(report.verified),
+        "uncertain": len(report.uncertain),
+        "flagged": len(report.flagged),
+        "hallucinations": len(report.hallucinations),
+    }
+
+
+def _save_trace(
+    *,
+    endpoint: str,
+    report: IntegrityReport,
+    evidence: list[TraceClaimEvidence],
+) -> None:
+    if not _trace_store.enabled:
+        return
+    trace = VerifyTrace(
+        request_id=report.metadata.request_id,
+        endpoint=endpoint,
+        report=report,
+        evidence=list(evidence),
+    )
+    _trace_store.save(trace)
+
+
+def _emit_audit_for_report(
+    http_request: Request,
+    *,
+    endpoint: str,
+    report: IntegrityReport,
+) -> None:
+    """Write one audit line for a single-report verify call and stash the
+    request_id so the timing middleware surfaces X-Request-ID."""
+    http_request.state.request_id = report.metadata.request_id
+    if not _audit_log.enabled:
+        return
+    record = build_verify_record(
+        request_id=report.metadata.request_id,
+        endpoint=endpoint,
+        model=report.metadata.model,
+        status_code=200,
+        latency_ms=report.metadata.duration_ms,
+        overall_score=report.overall_score,
+        claim_count=report.metadata.claim_count or len(report.claims),
+        outcome_counts=_outcome_counts(report),
+        input_tokens=report.metadata.input_tokens,
+        output_tokens=report.metadata.output_tokens,
+        estimated_cost_usd=report.metadata.estimated_cost_usd,
+    )
+    _audit_log.append(record)
+
+
+def _emit_audit_for_batch(
+    http_request: Request,
+    *,
+    batch_id: str,
+    rollup: BatchRollup,
+    results: list[BatchItemResult],
+    duration_ms: int,
+) -> None:
+    """Write one audit line for the batch call (acceptance: exactly one line
+    per /verify* call). Aggregated counts come from the rollup."""
+    http_request.state.request_id = batch_id
+    if not _audit_log.enabled:
+        return
+    outcome_counts = {"verified": 0, "uncertain": 0, "flagged": 0, "hallucinations": 0}
+    claim_count = 0
+    for item in results:
+        if item.report is None:
+            continue
+        claim_count += item.report.metadata.claim_count or len(item.report.claims)
+        for key in outcome_counts:
+            outcome_counts[key] += len(getattr(item.report, key))
+    record = build_verify_record(
+        request_id=batch_id,
+        endpoint="/verify/batch",
+        model=settings.anthropic_model,
+        status_code=200,
+        latency_ms=duration_ms,
+        overall_score=None,
+        claim_count=claim_count,
+        outcome_counts=outcome_counts,
+        input_tokens=rollup.total_input_tokens,
+        output_tokens=rollup.total_output_tokens,
+        estimated_cost_usd=rollup.estimated_cost_usd,
+    )
+    record["item_count"] = rollup.item_count
+    record["ok_count"] = rollup.ok_count
+    record["error_count"] = rollup.error_count
+    record["hallucination_item_count"] = rollup.hallucination_item_count
+    record["mode"] = rollup.mode
+    _audit_log.append(record)
+
+
 @app.get("/", tags=["meta"])
 async def root() -> dict:
     return {
@@ -244,7 +414,15 @@ async def root() -> dict:
         "version": app.version,
         "docs": "/docs",
         "health": "/health",
-        "endpoints": ["/verify", "/verify/quick", "/verify/claims"],
+        "endpoints": [
+            "/verify",
+            "/verify/quick",
+            "/verify/claims",
+            "/verify/batch",
+            "/stats",
+            "/audit/events",
+            "/verify/trace/{request_id}",
+        ],
     }
 
 
@@ -262,6 +440,144 @@ async def health() -> dict:
             "misses": _report_cache.misses,
         },
     }
+
+
+@app.get(
+    "/stats",
+    tags=["meta"],
+    summary="Live operational metrics (latency, throughput, tokens, cost).",
+    description=(
+        "Read-only aggregate counters for observability and benchmarking. "
+        "Includes per-endpoint p50/p95/p99 latency, request/error totals, "
+        "cache hit rate, token usage, and an estimated USD cost envelope."
+    ),
+)
+async def stats() -> dict:
+    total_hits = _report_cache.hits
+    total_misses = _report_cache.misses
+    lookups = total_hits + total_misses
+    return {
+        "model": settings.anthropic_model,
+        "cache": {
+            "enabled": settings.cache_enabled,
+            "size": len(_report_cache),
+            "hits": total_hits,
+            "misses": total_misses,
+            "hit_rate": (total_hits / lookups) if lookups else 0.0,
+        },
+        "metrics": _metrics.snapshot(),
+    }
+
+
+_AUDIT_ALLOWED_ENDPOINTS = {
+    "/verify",
+    "/verify/quick",
+    "/verify/claims",
+    "/verify/batch",
+}
+
+
+@app.get(
+    "/audit/events",
+    response_model=AuditEventsResponse,
+    tags=["meta"],
+    summary="Tail the append-only audit log.",
+    description=(
+        "Returns the most recent audit records (newest last). Each `/verify*` "
+        "call appends exactly one record — request_id, endpoint, model, "
+        "latency, outcome counts, token totals, and cost. The same "
+        "`request_id` is surfaced on the originating response's `X-Request-ID` "
+        "header, so records can be correlated end-to-end."
+    ),
+)
+async def audit_events(
+    since: Optional[str] = Query(
+        default=None,
+        description="ISO-8601 timestamp; only records with `timestamp >= since` are returned.",
+    ),
+    endpoint: Optional[str] = Query(
+        default=None,
+        description="Filter to a single endpoint (e.g. `/verify`).",
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        description="Maximum records to return. Capped by `audit_max_returned`.",
+    ),
+) -> AuditEventsResponse:
+    since_dt: Optional[datetime] = None
+    if since:
+        since_dt = _parse_since_param(since)
+    if endpoint is not None and endpoint not in _AUDIT_ALLOWED_ENDPOINTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "invalid_endpoint",
+                "message": (
+                    f"endpoint must be one of {sorted(_AUDIT_ALLOWED_ENDPOINTS)}."
+                ),
+            },
+        )
+    capped = min(int(limit), int(settings.audit_max_returned))
+    records = _audit_log.read_tail(limit=capped, since=since_dt, endpoint=endpoint)
+    return AuditEventsResponse(
+        count=len(records),
+        events=[AuditEvent.model_validate(r) for r in records],
+    )
+
+
+def _parse_since_param(value: str) -> datetime:
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "invalid_since",
+                "message": "`since` must be an ISO-8601 timestamp (e.g. 2026-04-24T00:00:00Z).",
+            },
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+@app.get(
+    "/verify/trace/{request_id}",
+    response_model=VerifyTrace,
+    tags=["verify"],
+    summary="Retrieve the explainability trace for a prior verification.",
+    description=(
+        "Returns the full `IntegrityReport` plus the per-claim evidence the "
+        "pipeline produced while computing it — matched passages, grounding "
+        "reasoning, consistency verdicts and reasoning, and internal "
+        "contradiction links. Use the `X-Request-ID` header from a prior "
+        "`/verify*` response (or `request_id` in the audit log) to correlate. "
+        "Traces are held in memory with a bounded TTL, so old request IDs may "
+        "return 404."
+    ),
+    responses={
+        200: {"description": "Trace for the given request_id."},
+        404: {"description": "Trace not found or expired."},
+    },
+)
+async def verify_trace(request_id: str) -> VerifyTrace:
+    trace = _trace_store.get(request_id)
+    if trace is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "trace_not_found",
+                "message": (
+                    f"No trace is available for request_id={request_id!r}. "
+                    "Traces expire after the configured TTL."
+                ),
+            },
+        )
+    return trace
 
 
 _VERIFY_EXAMPLE = {
@@ -289,16 +605,22 @@ _VERIFY_EXAMPLE = {
     },
     openapi_extra={"requestBody": {"content": {"application/json": {"example": _VERIFY_EXAMPLE}}}},
 )
-async def verify(request: VerifyRequest) -> IntegrityReport:
+async def verify(request: VerifyRequest, http_request: Request) -> IntegrityReport:
     _enforce_size(request.source_context, request.llm_output)
     key = make_cache_key("full", request.source_context, request.llm_output)
     cached = _cached_or_run(key)
     if cached is not None:
-        return IntegrityReport.model_validate(cached)
+        report = IntegrityReport.model_validate(cached)
+        _stash_usage(http_request, report)
+        _emit_audit_for_report(http_request, endpoint="/verify", report=report)
+        return report
 
     pipeline = VerifyPipeline()
     report = await pipeline.run(request)
     _cache_put(key, report)
+    _stash_usage(http_request, report)
+    _save_trace(endpoint="/verify", report=report, evidence=pipeline.last_evidence)
+    _emit_audit_for_report(http_request, endpoint="/verify", report=report)
     return report
 
 
@@ -315,16 +637,24 @@ async def verify(request: VerifyRequest) -> IntegrityReport:
     ),
     openapi_extra={"requestBody": {"content": {"application/json": {"example": _VERIFY_EXAMPLE}}}},
 )
-async def verify_quick(request: VerifyQuickRequest) -> IntegrityReport:
+async def verify_quick(
+    request: VerifyQuickRequest, http_request: Request
+) -> IntegrityReport:
     _enforce_size(request.source_context, request.llm_output)
     key = make_cache_key("quick", request.source_context, request.llm_output)
     cached = _cached_or_run(key)
     if cached is not None:
-        return IntegrityReport.model_validate(cached)
+        report = IntegrityReport.model_validate(cached)
+        _stash_usage(http_request, report)
+        _emit_audit_for_report(http_request, endpoint="/verify/quick", report=report)
+        return report
 
     pipeline = VerifyPipeline()
     report = await pipeline.run_quick(request)
     _cache_put(key, report)
+    _stash_usage(http_request, report)
+    _save_trace(endpoint="/verify/quick", report=report, evidence=pipeline.last_evidence)
+    _emit_audit_for_report(http_request, endpoint="/verify/quick", report=report)
     return report
 
 
@@ -349,7 +679,9 @@ _CLAIMS_EXAMPLE = {
     ),
     openapi_extra={"requestBody": {"content": {"application/json": {"example": _CLAIMS_EXAMPLE}}}},
 )
-async def verify_claims(request: VerifyClaimsRequest) -> IntegrityReport:
+async def verify_claims(
+    request: VerifyClaimsRequest, http_request: Request
+) -> IntegrityReport:
     _enforce_size(request.source_context)
     _enforce_claim_count(len(request.claims))
 
@@ -361,11 +693,17 @@ async def verify_claims(request: VerifyClaimsRequest) -> IntegrityReport:
     )
     cached = _cached_or_run(key)
     if cached is not None:
-        return IntegrityReport.model_validate(cached)
+        report = IntegrityReport.model_validate(cached)
+        _stash_usage(http_request, report)
+        _emit_audit_for_report(http_request, endpoint="/verify/claims", report=report)
+        return report
 
     pipeline = VerifyPipeline()
     report = await pipeline.run_with_claims(request.source_context, claims)
     _cache_put(key, report)
+    _stash_usage(http_request, report)
+    _save_trace(endpoint="/verify/claims", report=report, evidence=pipeline.last_evidence)
+    _emit_audit_for_report(http_request, endpoint="/verify/claims", report=report)
     return report
 
 
@@ -378,3 +716,167 @@ def _to_claim(ci: ClaimInput) -> Claim:
     if ci.id:
         kwargs["id"] = ci.id
     return Claim(**kwargs)
+
+
+_BATCH_EXAMPLE = {
+    "mode": "full",
+    "items": [
+        {
+            "source_context": "The Eiffel Tower is in Paris, France. It was completed in 1889.",
+            "llm_output": "The Eiffel Tower is in Paris and opened in 1889.",
+        },
+        {
+            "source_context": "Mount Everest is 8,848.86 metres tall.",
+            "llm_output": "Mount Everest is 8,848.86 metres tall and located in Canada.",
+        },
+    ],
+}
+
+
+@app.post(
+    "/verify/batch",
+    response_model=VerifyBatchReport,
+    tags=["verify"],
+    summary="Verify many (source, output) pairs in one call.",
+    description=(
+        "Processes items concurrently with a bounded semaphore. Per-item "
+        "failures are isolated — the batch always returns a result for each "
+        "input. Response includes a roll-up with throughput, token, and cost "
+        "totals suitable for load-test and `$/1k` reporting."
+    ),
+    responses={
+        200: {"description": "Batch report with per-item results and roll-up."},
+        413: {"description": "Too many items or an item exceeds per-item size limits."},
+        422: {"description": "Validation error."},
+        429: {"description": "Rate limit exceeded."},
+    },
+    openapi_extra={"requestBody": {"content": {"application/json": {"example": _BATCH_EXAMPLE}}}},
+)
+async def verify_batch(
+    request: VerifyBatchRequest, http_request: Request
+) -> VerifyBatchReport:
+    _enforce_batch_count(len(request.items))
+    for idx, item in enumerate(request.items):
+        try:
+            _enforce_size(item.source_context, item.llm_output)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            detail = {**detail, "item_index": idx}
+            raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+
+    concurrency = max(1, int(settings.batch_concurrency))
+    semaphore = asyncio.Semaphore(concurrency)
+    mode = request.mode
+
+    t0 = time.perf_counter()
+    results = await asyncio.gather(
+        *(
+            _process_batch_item(idx, item, mode, semaphore)
+            for idx, item in enumerate(request.items)
+        )
+    )
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+
+    rollup = _build_rollup(results, duration_ms, concurrency, mode)
+    report = VerifyBatchReport(rollup=rollup, results=results)
+
+    http_request.state.metrics_usage = {
+        "input_tokens": rollup.total_input_tokens,
+        "output_tokens": rollup.total_output_tokens,
+        "estimated_cost_usd": rollup.estimated_cost_usd,
+    }
+    batch_id = f"batch_{uuid4().hex[:12]}"
+    _emit_audit_for_batch(
+        http_request,
+        batch_id=batch_id,
+        rollup=rollup,
+        results=results,
+        duration_ms=duration_ms,
+    )
+    return report
+
+
+def _enforce_batch_count(n: int) -> None:
+    cap = settings.batch_max_items
+    if n > cap:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "error": "too_many_items",
+                "message": f"Batch size {n} exceeds batch_max_items={cap}.",
+            },
+        )
+
+
+async def _process_batch_item(
+    index: int,
+    item: VerifyBatchItem,
+    mode: str,
+    semaphore: asyncio.Semaphore,
+) -> BatchItemResult:
+    async with semaphore:
+        try:
+            key = make_cache_key(
+                f"batch:{mode}", item.source_context, item.llm_output
+            )
+            cached = _cached_or_run(key)
+            if cached is not None:
+                report = IntegrityReport.model_validate(cached)
+            else:
+                pipeline = VerifyPipeline()
+                if mode == "quick":
+                    req = VerifyQuickRequest(
+                        source_context=item.source_context,
+                        llm_output=item.llm_output,
+                    )
+                    report = await pipeline.run_quick(req)
+                else:
+                    req = VerifyRequest(
+                        source_context=item.source_context,
+                        llm_output=item.llm_output,
+                    )
+                    report = await pipeline.run(req)
+                _cache_put(key, report)
+                _save_trace(
+                    endpoint="/verify/batch",
+                    report=report,
+                    evidence=pipeline.last_evidence,
+                )
+            return BatchItemResult(index=index, status="ok", report=report)
+        except Exception as exc:  # noqa: BLE001 — isolate per-item failures.
+            log.exception("Batch item %d failed", index)
+            return BatchItemResult(
+                index=index,
+                status="error",
+                error=BatchItemError(
+                    code=type(exc).__name__,
+                    message=str(exc) or "unexpected error",
+                ),
+            )
+
+
+def _build_rollup(
+    results: list[BatchItemResult],
+    duration_ms: int,
+    concurrency: int,
+    mode: str,
+) -> BatchRollup:
+    ok = [r for r in results if r.status == "ok" and r.report is not None]
+    errors = [r for r in results if r.status == "error"]
+    total_in = sum(r.report.metadata.input_tokens for r in ok)
+    total_out = sum(r.report.metadata.output_tokens for r in ok)
+    total_cost = sum(r.report.metadata.estimated_cost_usd for r in ok)
+    hallucination_items = sum(1 for r in ok if r.report.hallucinations)
+    return BatchRollup(
+        item_count=len(results),
+        ok_count=len(ok),
+        error_count=len(errors),
+        hallucination_item_count=hallucination_items,
+        total_input_tokens=total_in,
+        total_output_tokens=total_out,
+        total_tokens=total_in + total_out,
+        estimated_cost_usd=round(total_cost, 6),
+        duration_ms=duration_ms,
+        concurrency=concurrency,
+        mode=mode,
+    )

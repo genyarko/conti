@@ -5,15 +5,19 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol
+from typing import Any, Optional
 
 from engine.app.models.schemas import Claim, ConsistencyVerdict
-from engine.app.pipeline.extractor import AnthropicClient
 from engine.app.prompts.consistency_prompt import (
     CONSISTENCY_SYSTEM_PROMPT,
     CONTRADICTION_SYSTEM_PROMPT,
     build_consistency_user_prompt,
     build_contradiction_user_prompt,
+)
+from engine.app.services.anthropic_client import (
+    AnthropicClient,
+    ClaudeClient as _ClaudeClient,
+    TokenLedger,
 )
 from engine.config import settings
 
@@ -35,17 +39,6 @@ _VERDICT_ALIASES = {
 _SOURCE_CONSISTENT_VERDICTS = frozenset(
     {ConsistencyVerdict.CONSISTENT, ConsistencyVerdict.MINOR_CONCERN}
 )
-
-
-class _ClaudeClient(Protocol):
-    async def create_message(
-        self,
-        *,
-        system: str,
-        user: str,
-        model: str,
-        max_tokens: int,
-    ) -> str: ...
 
 
 @dataclass
@@ -152,10 +145,12 @@ class ConsistencyChecker:
         *,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        ledger: Optional[TokenLedger] = None,
     ) -> None:
         self._client = client or AnthropicClient(api_key=settings.anthropic_api_key)
         self._model = model or settings.anthropic_fast_model
         self._max_tokens = max_tokens or settings.anthropic_max_tokens
+        self._ledger = ledger
 
     async def check_source(
         self, claim: Claim, source_context: str
@@ -166,6 +161,8 @@ class ConsistencyChecker:
             model=self._model,
             max_tokens=self._max_tokens,
         )
+        if self._ledger is not None:
+            self._ledger.record_from(self._client)
         return _parse_consistency_response(raw)
 
     async def find_contradictions(
@@ -181,6 +178,8 @@ class ConsistencyChecker:
             model=self._model,
             max_tokens=self._max_tokens,
         )
+        if self._ledger is not None:
+            self._ledger.record_from(self._client)
         valid_ids = {c.id for c in claims}
         return _parse_contradictions_response(raw, valid_ids)
 

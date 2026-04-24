@@ -62,6 +62,24 @@ class Settings(BaseSettings):
     max_input_chars: int = Field(default=200_000, alias="MAX_INPUT_CHARS")
     max_claims_per_request: int = Field(default=200, alias="MAX_CLAIMS_PER_REQUEST")
 
+    # --- Batch verification ---
+    batch_max_items: int = Field(default=50, alias="BATCH_MAX_ITEMS")
+    batch_concurrency: int = Field(default=8, alias="BATCH_CONCURRENCY")
+
+    # --- Audit log (append-only JSONL, size-rotated) ---
+    audit_enabled: bool = Field(default=True, alias="AUDIT_ENABLED")
+    audit_path: str = Field(
+        default=str(ROOT_DIR / "engine" / "logs" / "audit.jsonl"),
+        alias="AUDIT_PATH",
+    )
+    audit_max_bytes: int = Field(default=10 * 1024 * 1024, alias="AUDIT_MAX_BYTES")
+    audit_max_returned: int = Field(default=500, alias="AUDIT_MAX_RETURNED")
+
+    # --- Explainability trace store (in-memory, same TTL as /audit/events context) ---
+    trace_enabled: bool = Field(default=True, alias="TRACE_ENABLED")
+    trace_ttl_seconds: int = Field(default=900, alias="TRACE_TTL_SECONDS")
+    trace_max_entries: int = Field(default=256, alias="TRACE_MAX_ENTRIES")
+
     # --- Pipeline thresholds ---
     grounding_threshold_verified: int = Field(
         default=90, alias="GROUNDING_THRESHOLD_VERIFIED"

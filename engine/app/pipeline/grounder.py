@@ -5,15 +5,19 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any, Optional
 
 from rapidfuzz import fuzz
 
 from engine.app.models.schemas import Claim, GroundingLevel
-from engine.app.pipeline.extractor import AnthropicClient
 from engine.app.prompts.grounder_prompt import (
     GROUNDER_SYSTEM_PROMPT,
     build_grounder_user_prompt,
+)
+from engine.app.services.anthropic_client import (
+    AnthropicClient,
+    ClaudeClient as _ClaudeClient,
+    TokenLedger,
 )
 from engine.config import settings
 
@@ -22,17 +26,6 @@ log = logging.getLogger(__name__)
 _SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]?", re.MULTILINE)
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
-class _ClaudeClient(Protocol):
-    async def create_message(
-        self,
-        *,
-        system: str,
-        user: str,
-        model: str,
-        max_tokens: int,
-    ) -> str: ...
 
 
 @dataclass
@@ -135,10 +128,12 @@ class ClaimGrounder:
         *,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        ledger: Optional[TokenLedger] = None,
     ) -> None:
         self._client = client or AnthropicClient(api_key=settings.anthropic_api_key)
         self._model = model or settings.anthropic_fast_model
         self._max_tokens = max_tokens or settings.anthropic_max_tokens
+        self._ledger = ledger
 
     async def ground(self, claim: Claim, source_context: str) -> GroundingResult:
         source_context = source_context or ""
@@ -173,6 +168,8 @@ class ClaimGrounder:
             model=self._model,
             max_tokens=self._max_tokens,
         )
+        if self._ledger is not None:
+            self._ledger.record_from(self._client)
         data = _parse_grounder_response(raw)
         support = str(data.get("support", "none")).lower().strip()
         passage = data.get("matched_passage")
