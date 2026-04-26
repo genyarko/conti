@@ -73,8 +73,19 @@ export default function ContractUploadView() {
     );
   }
 
-  if (isBusy && (stage === "analyzing" || stage === "verifying")) {
-    return <ContractSkeleton stage={stage} />;
+  // Swap the upload page for the skeleton the moment work starts. The user
+  // gets unmistakable feedback that the request is in flight — without this,
+  // the upload page sits unchanged through the upload + parse round-trip and
+  // people refresh because the drop zone never reacted.
+  // The second clause covers the brief gap between upload finishing and the
+  // auto-analyze useEffect kicking in (stage="idle", isBusy=false, but upload
+  // exists), which would otherwise flash the upload page for a frame.
+  const inProgress =
+    (isBusy && stage !== "idle") || (!!upload && !result && !error);
+  if (inProgress) {
+    return (
+      <ContractSkeleton stage={stage === "idle" ? "analyzing" : stage} />
+    );
   }
 
   return (
