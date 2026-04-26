@@ -83,6 +83,13 @@ class AnthropicClient:
             input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
         )
+        # Reject truncated responses up-front: a max_tokens stop produces a
+        # mid-sentence string that downstream JSON parsers can't recover.
+        if getattr(resp, "stop_reason", None) == "max_tokens":
+            raise RuntimeError(
+                f"Anthropic response was truncated at max_tokens={max_tokens}. "
+                "Increase ANTHROPIC_MAX_TOKENS or shorten the input."
+            )
         parts: list[str] = []
         for block in resp.content:
             text = getattr(block, "text", None)

@@ -15,6 +15,8 @@ services:
         sync: false
       - key: ANTHROPIC_MODEL
         value: claude-sonnet-4-6
+      - key: ANTHROPIC_MAX_TOKENS
+        value: "16384"
       - key: ENGINE_ENV
         value: production
       - key: ENGINE_LOG_LEVEL
@@ -40,6 +42,8 @@ services:
         sync: false
       - key: ANTHROPIC_MODEL
         value: claude-sonnet-4-6
+      - key: ANTHROPIC_MAX_TOKENS
+        value: "16384"
       - key: TRUSTLAYER_BASE_URL
         fromService:
           type: web
