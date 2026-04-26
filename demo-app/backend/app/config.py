@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     anthropic_fast_model: str = Field(
         default="claude-haiku-4-5-20251001", alias="ANTHROPIC_FAST_MODEL"
     )
-    anthropic_max_tokens: int = Field(default=4096, alias="ANTHROPIC_MAX_TOKENS")
+    anthropic_max_tokens: int = Field(default=16384, alias="ANTHROPIC_MAX_TOKENS")
 
     # --- TrustLayer engine ---
     trustlayer_base_url: str = Field(
