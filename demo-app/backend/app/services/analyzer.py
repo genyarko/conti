@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
-
-from json_repair import repair_json
 
 from app.config import settings
 from app.models.schemas import (
@@ -16,13 +12,16 @@ from app.models.schemas import (
     FindingCategory,
     RiskLevel,
 )
-from app.prompts.analyzer_prompt import ANALYZER_SYSTEM_PROMPT, build_analyzer_user_prompt
+from app.prompts.analyzer_prompt import (
+    ANALYZER_SYSTEM_PROMPT,
+    ANALYZER_TOOL_DESCRIPTION,
+    ANALYZER_TOOL_NAME,
+    ANALYZER_TOOL_SCHEMA,
+    build_analyzer_user_prompt,
+)
 from app.services.anthropic_client import AnthropicClient, ClaudeClient
 
 log = logging.getLogger(__name__)
-
-_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 @dataclass
@@ -30,7 +29,7 @@ class AnalysisResult:
     summary: ContractSummary
     findings: list[Finding]
     missing_clauses: list[Finding]
-    raw_response: str = ""
+    raw_response: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -65,13 +64,15 @@ class ContractAnalyzer:
         ]
         user_prompt = build_analyzer_user_prompt(payload, filename=filename)
 
-        raw = await self._client.create_message(
+        parsed = await self._client.create_with_tool(
             system=ANALYZER_SYSTEM_PROMPT,
             user=user_prompt,
             model=self._model,
             max_tokens=self._max_tokens,
+            tool_name=ANALYZER_TOOL_NAME,
+            tool_description=ANALYZER_TOOL_DESCRIPTION,
+            input_schema=ANALYZER_TOOL_SCHEMA,
         )
-        parsed = _parse_response(raw)
 
         clause_index = {c.section_id: c for c in clauses}
         findings = [
@@ -100,33 +101,8 @@ class ContractAnalyzer:
             summary=summary,
             findings=findings,
             missing_clauses=missing,
-            raw_response=raw,
+            raw_response=parsed,
         )
-
-
-def _strip_fences(text: str) -> str:
-    return _CODE_FENCE_RE.sub("", text).strip()
-
-
-def _parse_response(raw: str) -> dict[str, Any]:
-    cleaned = _strip_fences(raw)
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = _JSON_OBJECT_RE.search(cleaned)
-        candidate = match.group(0) if match else cleaned
-        try:
-            data = json.loads(candidate)
-        except json.JSONDecodeError:
-            # LLMs frequently emit JSON with unescaped quotes inside verbatim
-            # quote fields, trailing commas, or smart quotes. Repair before
-            # giving up — losing a finding to a bad escape would defeat the
-            # point of the analyzer.
-            log.warning("analyzer: strict JSON parse failed; attempting repair")
-            data = json.loads(repair_json(candidate))
-    if not isinstance(data, dict):
-        raise ValueError("Analyzer JSON root must be an object.")
-    return data
 
 
 def _coerce_risk(value: Any, *, default: RiskLevel) -> RiskLevel:

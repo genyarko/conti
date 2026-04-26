@@ -1,7 +1,6 @@
 """End-to-end pipeline test with Claude and TrustLayer stubbed out."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -65,9 +64,12 @@ ANALYZER_RESPONSE = {
 
 @dataclass
 class FakeClaudeClient:
-    response: str
+    response: dict[str, Any]
 
     async def create_message(self, **kwargs: Any) -> str:
+        raise AssertionError("analyzer should use create_with_tool, not create_message")
+
+    async def create_with_tool(self, **kwargs: Any) -> dict[str, Any]:
         return self.response
 
 
@@ -106,7 +108,7 @@ class FakeVerifier:
 async def test_pipeline_separates_verified_and_removed():
     contract = ingest_text(SAMPLE_CONTRACT, filename="sample.txt")
     analyzer = ContractAnalyzer(
-        client=FakeClaudeClient(response=json.dumps(ANALYZER_RESPONSE)),
+        client=FakeClaudeClient(response=ANALYZER_RESPONSE),
         model="test-model",
         max_tokens=1024,
     )
