@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from json_repair import repair_json
+
 from app.config import settings
 from app.models.schemas import (
     Clause,
@@ -112,9 +114,16 @@ def _parse_response(raw: str) -> dict[str, Any]:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
         match = _JSON_OBJECT_RE.search(cleaned)
-        if not match:
-            raise ValueError(f"Analyzer returned non-JSON output: {raw[:200]!r}")
-        data = json.loads(match.group(0))
+        candidate = match.group(0) if match else cleaned
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            # LLMs frequently emit JSON with unescaped quotes inside verbatim
+            # quote fields, trailing commas, or smart quotes. Repair before
+            # giving up — losing a finding to a bad escape would defeat the
+            # point of the analyzer.
+            log.warning("analyzer: strict JSON parse failed; attempting repair")
+            data = json.loads(repair_json(candidate))
     if not isinstance(data, dict):
         raise ValueError("Analyzer JSON root must be an object.")
     return data
