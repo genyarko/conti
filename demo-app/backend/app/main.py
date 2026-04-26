@@ -72,6 +72,23 @@ def _requires_auth(request: Request) -> bool:
     return False
 
 
+# Registered FIRST so it ends up innermost in the user middleware stack —
+# unhandled exceptions are caught here and the 500 response then flows back
+# out through CORSMiddleware, picking up Access-Control-Allow-Origin headers.
+# (Routing Exception via @app.exception_handler hits Starlette's outermost
+# ServerErrorMiddleware, which bypasses user middleware and strips CORS.)
+@app.middleware("http")
+async def catch_unhandled_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        log.exception("Unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "internal_error", "message": "An unexpected error occurred."},
+        )
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     if settings.api_auth_token and _requires_auth(request):
@@ -92,8 +109,8 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# Registered last so it wraps auth_middleware — short-circuit responses
-# (e.g. 401 from auth) still get Access-Control-Allow-Origin headers.
+# Registered last so it wraps auth_middleware and catch_unhandled_errors —
+# every short-circuit response (401, 500, etc.) gets CORS headers.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -122,15 +139,6 @@ async def http_exception_handler(request, exc: HTTPException):
         "message": str(exc.detail),
     }
     return JSONResponse(status_code=exc.status_code, content=payload)
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request, exc: Exception):
-    log.exception("Unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": "internal_error", "message": "An unexpected error occurred."},
-    )
 
 
 @app.get("/", tags=["meta"])
