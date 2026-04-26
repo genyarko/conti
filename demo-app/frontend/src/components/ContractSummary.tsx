@@ -9,17 +9,19 @@ interface Props {
 }
 
 export default function ContractSummary({ result }: Props) {
-  const { summary, findings, removed_findings, clauses } = result;
-  const counts = findings.reduce(
-    (acc, f) => {
-      acc[f.finding.risk] = (acc[f.finding.risk] ?? 0) + 1;
-      return acc;
-    },
-    { critical: 0, warning: 0, info: 0, ok: 0 } as Record<
-      "critical" | "warning" | "info" | "ok",
-      number
-    >,
-  );
+  const { summary, findings, removed_findings, missing_clauses, clauses } = result;
+  // Include missing clauses in the risk counts. They have explicit risk levels
+  // and they're a big part of what the dashboard is telling the user about —
+  // hiding them from the header tiles produced "Critical · 0" sitting right
+  // above a critical missing-clause card, which read as a contradiction.
+  const counts = { critical: 0, warning: 0, info: 0, ok: 0 } as Record<
+    "critical" | "warning" | "info" | "ok",
+    number
+  >;
+  for (const vf of findings) counts[vf.finding.risk] += 1;
+  for (const m of missing_clauses) {
+    if (m.risk in counts) counts[m.risk as keyof typeof counts] += 1;
+  }
 
   return (
     <div className="card p-6 space-y-6 animate-fade-in">
