@@ -125,3 +125,111 @@ async def test_pipeline_separates_verified_and_removed():
     # Missing clause lives in its own bucket.
     missing_titles = [f.title for f in response.missing_clauses]
     assert "Confidentiality" in missing_titles
+
+
+# Regression: the analyzer used to dump everything into missing_clauses when
+# the schema made findings hard to populate, and the integrity score would
+# return a hardcoded 100 — leaving the UI showing "100 Trusted" next to a
+# Critical risk badge. The score must reflect missing-clause severity.
+ANALYZER_RESPONSE_NO_CLAUSE_FINDINGS = {
+    "contract_type": "Service Agreement",
+    "parties": ["Provider", "Customer"],
+    "plain_language_summary": "Provider-favorable contract.",
+    "overall_risk": "critical",
+    "findings": [],
+    "missing_clauses": [
+        {
+            "title": "Limitation of Liability",
+            "risk": "critical",
+            "summary": "No liability cap.",
+            "recommendation": "Add a mutual cap.",
+        },
+        {
+            "title": "Service Level Agreement",
+            "risk": "warning",
+            "summary": "No SLA defined.",
+            "recommendation": "Define service levels.",
+        },
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_score_reflects_missing_clauses_when_no_findings():
+    contract = ingest_text(SAMPLE_CONTRACT, filename="sample.txt")
+    analyzer = ContractAnalyzer(
+        client=FakeClaudeClient(response=ANALYZER_RESPONSE_NO_CLAUSE_FINDINGS),
+        model="test-model",
+        max_tokens=1024,
+    )
+    pipeline = AnalysisPipeline(analyzer=analyzer, verifier=FakeVerifier())
+
+    response = await pipeline.run(contract)
+
+    assert len(response.findings) == 0
+    assert len(response.missing_clauses) == 2
+    # Critical missing clause must drag the score below 100.
+    assert response.summary.integrity_score < 100
+    assert response.summary.integrity_score <= 50
+    # Risk badge must reflect missing-clause severity, not just findings.
+    assert response.summary.overall_risk == RiskLevel.CRITICAL
+
+
+@pytest.mark.asyncio
+async def test_score_is_100_only_when_truly_clean():
+    contract = ingest_text(SAMPLE_CONTRACT, filename="sample.txt")
+    clean_response = {
+        "contract_type": "Service Agreement",
+        "parties": ["Provider", "Customer"],
+        "plain_language_summary": "Clean contract.",
+        "overall_risk": "ok",
+        "findings": [],
+        "missing_clauses": [],
+    }
+    analyzer = ContractAnalyzer(
+        client=FakeClaudeClient(response=clean_response),
+        model="test-model",
+        max_tokens=1024,
+    )
+    pipeline = AnalysisPipeline(analyzer=analyzer, verifier=FakeVerifier())
+
+    response = await pipeline.run(contract)
+
+    assert response.summary.integrity_score == 100
+    assert response.summary.overall_risk == RiskLevel.OK
+
+
+@pytest.mark.asyncio
+async def test_findings_with_optional_clause_quote():
+    """clause_quote is no longer required — verify finding survives without it."""
+    response_no_quotes = {
+        "contract_type": "Sample Agreement",
+        "parties": ["Provider", "Customer"],
+        "plain_language_summary": "Test.",
+        "overall_risk": "warning",
+        "findings": [
+            {
+                "section_id": "1",
+                "title": "Missing-quote finding",
+                "risk": "warning",
+                "category": "payment",
+                "summary": "Issue without a clause_quote field.",
+                "recommendation": "Fix it.",
+                # clause_quote intentionally omitted
+            }
+        ],
+        "missing_clauses": [],
+    }
+    contract = ingest_text(SAMPLE_CONTRACT, filename="sample.txt")
+    analyzer = ContractAnalyzer(
+        client=FakeClaudeClient(response=response_no_quotes),
+        model="test-model",
+        max_tokens=1024,
+    )
+    pipeline = AnalysisPipeline(analyzer=analyzer, verifier=FakeVerifier())
+
+    response = await pipeline.run(contract)
+    titles = [vf.finding.title for vf in response.findings]
+    assert "Missing-quote finding" in titles
+    finding = next(vf.finding for vf in response.findings if vf.finding.title == "Missing-quote finding")
+    assert finding.clause_quote is None

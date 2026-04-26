@@ -75,12 +75,22 @@ class ContractAnalyzer:
         )
 
         clause_index = {c.section_id: c for c in clauses}
-        findings = [
-            _to_finding(item, clause_index)
-            for item in parsed.get("findings", [])
-            if isinstance(item, dict)
+        raw_findings = [
+            item for item in parsed.get("findings", []) if isinstance(item, dict)
         ]
-        findings = [f for f in findings if f is not None]
+        dropped_unknown_section = 0
+        dropped_invented_quote = 0
+        findings: list[Finding] = []
+        for item in raw_findings:
+            converted, drop_reason = _to_finding_with_reason(item, clause_index)
+            if converted is not None:
+                findings.append(converted)
+            elif drop_reason == "unknown_section":
+                dropped_unknown_section += 1
+            if drop_reason == "invented_quote":
+                # Counted alongside successful conversion — the finding kept
+                # the rest of the data, just lost a fabricated quote.
+                dropped_invented_quote += 1
 
         missing = [
             _to_missing_finding(item)
@@ -88,6 +98,12 @@ class ContractAnalyzer:
             if isinstance(item, dict)
         ]
         missing = [f for f in missing if f is not None]
+
+        if dropped_unknown_section:
+            log.warning(
+                "analyzer: dropped %d finding(s) referencing unknown section_id",
+                dropped_unknown_section,
+            )
 
         summary = ContractSummary(
             contract_type=str(parsed.get("contract_type") or "Unknown"),
@@ -102,6 +118,11 @@ class ContractAnalyzer:
             findings=findings,
             missing_clauses=missing,
             raw_response=parsed,
+            metadata={
+                "raw_findings_count": len(raw_findings),
+                "dropped_unknown_section": dropped_unknown_section,
+                "dropped_invented_quote": dropped_invented_quote,
+            },
         )
 
 
@@ -123,30 +144,38 @@ def _coerce_category(value: Any) -> FindingCategory:
     return FindingCategory.OTHER
 
 
-def _to_finding(raw: dict[str, Any], clause_index: dict[str, Clause]) -> Optional[Finding]:
+def _to_finding_with_reason(
+    raw: dict[str, Any],
+    clause_index: dict[str, Clause],
+) -> tuple[Optional[Finding], Optional[str]]:
     section_id = str(raw.get("section_id") or "").strip()
     title = str(raw.get("title") or "").strip()
     summary = str(raw.get("summary") or "").strip()
     if not section_id or not title or not summary:
-        return None
+        return None, "incomplete"
 
     # Drop the finding if it points at a clause the analyzer hallucinated.
     if section_id != "missing" and section_id not in clause_index:
-        log.warning("analyzer: dropping finding pointing at unknown section_id=%s", section_id)
-        return None
+        log.warning(
+            "analyzer: dropping finding pointing at unknown section_id=%s",
+            section_id,
+        )
+        return None, "unknown_section"
 
     quote = raw.get("clause_quote")
+    invented_quote = False
     if isinstance(quote, str):
         quote = quote.strip() or None
         # If the quote isn't literally in the referenced clause, strip it —
         # the verifier will still score the claim against the clause text.
         clause = clause_index.get(section_id)
         if quote and clause and quote not in clause.text:
+            invented_quote = True
             quote = None
     else:
         quote = None
 
-    return Finding(
+    finding = Finding(
         section_id=section_id,
         title=title,
         risk=_coerce_risk(raw.get("risk"), default=RiskLevel.WARNING),
@@ -155,6 +184,7 @@ def _to_finding(raw: dict[str, Any], clause_index: dict[str, Clause]) -> Optiona
         recommendation=str(raw.get("recommendation") or "").strip(),
         clause_quote=quote,
     )
+    return finding, ("invented_quote" if invented_quote else None)
 
 
 def _to_missing_finding(raw: dict[str, Any]) -> Optional[Finding]:

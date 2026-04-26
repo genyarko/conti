@@ -41,7 +41,11 @@ class AnalysisPipeline:
         if skip_verification or not all_findings:
             verified_findings = [_as_unchecked(f) for f in analysis.findings]
             missing_unchecked = analysis.missing_clauses
-            summary = _summary_without_verification(analysis.summary)
+            summary = _summary_without_verification(
+                analysis.summary,
+                missing_clauses=missing_unchecked,
+                skip_verification=skip_verification,
+            )
             return AnalyzeResponse(
                 contract_id=contract.contract_id,
                 filename=contract.filename,
@@ -80,8 +84,15 @@ class AnalysisPipeline:
 
         summary = ContractSummary(
             contract_type=analysis.summary.contract_type,
-            overall_risk=_compute_overall_risk(findings_bucket, analysis.summary.overall_risk),
-            integrity_score=_compute_integrity_score(findings_bucket),
+            overall_risk=_compute_overall_risk(
+                findings_bucket,
+                missing_bucket_unverified,
+                analysis.summary.overall_risk,
+            ),
+            integrity_score=_compute_integrity_score(
+                findings_bucket,
+                missing_bucket_unverified,
+            ),
             plain_language_summary=analysis.summary.plain_language_summary,
             key_parties=analysis.summary.key_parties,
         )
@@ -100,6 +111,8 @@ class AnalysisPipeline:
                 "verify_ms": verify_ms,
                 "num_findings": len(findings_bucket),
                 "num_removed": len(outcome.removed),
+                "num_missing_clauses": len(missing_bucket_unverified),
+                "analyzer": analysis.metadata,
             },
         )
 
@@ -114,11 +127,24 @@ def _as_unchecked(finding) -> VerifiedFinding:
     )
 
 
-def _summary_without_verification(base: ContractSummary) -> ContractSummary:
+def _summary_without_verification(
+    base: ContractSummary,
+    *,
+    missing_clauses: list,
+    skip_verification: bool,
+) -> ContractSummary:
+    # When the user explicitly opts out of verification, score 0 reflects
+    # "we did not check." When we just had nothing to verify (clean contract),
+    # the score should reflect that — using the same formula as the verified
+    # path, with an empty findings list.
+    if skip_verification:
+        score = 0
+    else:
+        score = _compute_integrity_score([], missing_clauses)
     return ContractSummary(
         contract_type=base.contract_type,
-        overall_risk=base.overall_risk,
-        integrity_score=0,
+        overall_risk=_compute_overall_risk([], missing_clauses, base.overall_risk),
+        integrity_score=score,
         plain_language_summary=base.plain_language_summary,
         key_parties=base.key_parties,
     )
@@ -132,18 +158,47 @@ _RISK_ORDER = {
 }
 
 
-def _compute_overall_risk(findings: list[VerifiedFinding], fallback: RiskLevel) -> RiskLevel:
-    if not findings:
+def _compute_overall_risk(
+    findings: list[VerifiedFinding],
+    missing_clauses: list,
+    fallback: RiskLevel,
+) -> RiskLevel:
+    risks: list[RiskLevel] = [vf.finding.risk for vf in findings]
+    risks.extend(m.risk for m in missing_clauses)
+    if not risks:
         return fallback
-    worst = max(
-        (vf.finding.risk for vf in findings),
-        key=lambda r: _RISK_ORDER.get(r, 0),
+    return max(risks, key=lambda r: _RISK_ORDER.get(r, 0))
+
+
+def _compute_integrity_score(
+    findings: list[VerifiedFinding],
+    missing_clauses: list,
+) -> int:
+    """Single user-visible "trust this analysis" number.
+
+    The score reflects how well the analyzer's output stood up to verification,
+    penalized by the severity of clauses the analyzer flagged as absent. A
+    perfect 100 is reserved for cases where the analyzer found no issues at
+    all — clause-level OR missing — so the headline never contradicts a
+    "Critical" risk badge sitting next to it.
+    """
+    critical_missing = sum(
+        1 for m in missing_clauses if m.risk == RiskLevel.CRITICAL
     )
-    return worst
+    warning_missing = sum(
+        1 for m in missing_clauses if m.risk == RiskLevel.WARNING
+    )
 
+    if findings:
+        avg = sum(vf.integrity_score for vf in findings) / len(findings)
+        base = int(round(avg))
+    elif missing_clauses:
+        # No clause-level findings to verify, but the analyzer flagged
+        # absent standard clauses. Cap below 100 — a "100 Trusted" badge
+        # next to a list of critical missing clauses is a confidence lie.
+        base = 50 if critical_missing else 75
+    else:
+        base = 100
 
-def _compute_integrity_score(findings: list[VerifiedFinding]) -> int:
-    if not findings:
-        return 100
-    total = sum(vf.integrity_score for vf in findings)
-    return int(round(total / len(findings)))
+    penalty = critical_missing * 10 + warning_missing * 3
+    return max(0, min(100, base - penalty))
