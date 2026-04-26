@@ -5,6 +5,7 @@ import BeforeAfterView from "../components/BeforeAfterView";
 import ClauseDetail from "../components/ClauseDetail";
 import ContractSummary from "../components/ContractSummary";
 import MissingClauseAlert from "../components/MissingClauseAlert";
+import PrintableReport from "../components/PrintableReport";
 import RiskBadge from "../components/RiskBadge";
 
 interface Props {
@@ -46,87 +47,99 @@ export default function ContractDashboardView({ result, onReset }: Props) {
   );
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm text-slate-400">
-          Reviewed{" "}
-          <span className="text-slate-200 font-semibold">{result.filename}</span>
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <button
-            type="button"
-            className={`text-xs px-3 py-1.5 rounded-md border transition-colors ${
-              showBeforeAfter
-                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                : "border-line text-slate-300 hover:border-slate-500"
-            }`}
-            onClick={() => setShowBeforeAfter((v) => !v)}
-          >
-            {showBeforeAfter ? "Hide" : "Show"} before/after
-          </button>
-          <label className="inline-flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              className="accent-emerald-400"
-              checked={showRemoved}
-              onChange={(e) => setShowRemoved(e.target.checked)}
-            />
-            Show removed findings
-            {result.removed_findings.length > 0 && (
-              <span className="rounded-full bg-red-500/15 text-red-300 text-[10px] px-1.5 py-0.5 font-mono">
-                {result.removed_findings.length}
-              </span>
-            )}
-          </label>
-          <button type="button" className="btn-ghost" onClick={onReset}>
-            New contract
-          </button>
-        </div>
-      </div>
-
-      <ContractSummary result={result} />
-
-      {showBeforeAfter && <BeforeAfterView result={result} />}
-
-      <MissingClauseAlert missing={result.missing_clauses} />
-
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4">
-        <aside className="card p-3 lg:sticky lg:top-20 lg:self-start lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto">
-          <div className="text-xs uppercase tracking-wider text-slate-500 px-1 py-2">
-            Clauses
+    <>
+      <div className="max-w-7xl mx-auto px-6 py-8 space-y-6 print:hidden">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm text-slate-400">
+            Reviewed{" "}
+            <span className="text-slate-200 font-semibold">{result.filename}</span>
           </div>
-          <ul className="space-y-1">
-            {result.clauses.map((c) => (
-              <ClauseListItem
-                key={c.section_id}
-                clause={c}
-                findings={findingsByClause.get(c.section_id) ?? []}
-                removedCount={
-                  (removedByClause.get(c.section_id) ?? []).length
-                }
-                active={c.section_id === selectedId}
-                onClick={() => setSelectedId(c.section_id)}
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              className={`text-xs px-3 py-1.5 rounded-md border transition-colors ${
+                showBeforeAfter
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-line text-slate-300 hover:border-slate-500"
+              }`}
+              onClick={() => setShowBeforeAfter((v) => !v)}
+            >
+              {showBeforeAfter ? "Hide" : "Show"} before/after
+            </button>
+            <label className="inline-flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="accent-emerald-400"
+                checked={showRemoved}
+                onChange={(e) => setShowRemoved(e.target.checked)}
               />
-            ))}
-          </ul>
-        </aside>
+              Show removed findings
+              {result.removed_findings.length > 0 && (
+                <span className="rounded-full bg-red-500/15 text-red-300 text-[10px] px-1.5 py-0.5 font-mono">
+                  {result.removed_findings.length}
+                </span>
+              )}
+            </label>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => window.print()}
+              title="Open the print dialog — choose 'Save as PDF' to export."
+            >
+              Download PDF
+            </button>
+            <button type="button" className="btn-ghost" onClick={onReset}>
+              New contract
+            </button>
+          </div>
+        </div>
 
-        <main>
-          {selectedClause ? (
-            <ClauseDetail
-              clause={selectedClause}
-              findings={findingsByClause.get(selectedClause.section_id) ?? []}
-              removed={removedByClause.get(selectedClause.section_id) ?? []}
-              showRemoved={showRemoved}
-            />
-          ) : (
-            <div className="card p-6 text-sm text-slate-400">
-              Select a clause to see findings.
+        <ContractSummary result={result} />
+
+        {showBeforeAfter && <BeforeAfterView result={result} />}
+
+        <MissingClauseAlert missing={result.missing_clauses} />
+
+        <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4">
+          <aside className="card p-3 lg:sticky lg:top-20 lg:self-start lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto">
+            <div className="text-xs uppercase tracking-wider text-slate-500 px-1 py-2">
+              Clauses
             </div>
-          )}
-        </main>
+            <ul className="space-y-1">
+              {result.clauses.map((c) => (
+                <ClauseListItem
+                  key={c.section_id}
+                  clause={c}
+                  findings={findingsByClause.get(c.section_id) ?? []}
+                  removedCount={
+                    (removedByClause.get(c.section_id) ?? []).length
+                  }
+                  active={c.section_id === selectedId}
+                  onClick={() => setSelectedId(c.section_id)}
+                />
+              ))}
+            </ul>
+          </aside>
+
+          <main>
+            {selectedClause ? (
+              <ClauseDetail
+                clause={selectedClause}
+                findings={findingsByClause.get(selectedClause.section_id) ?? []}
+                removed={removedByClause.get(selectedClause.section_id) ?? []}
+                showRemoved={showRemoved}
+              />
+            ) : (
+              <div className="card p-6 text-sm text-slate-400">
+                Select a clause to see findings.
+              </div>
+            )}
+          </main>
+        </div>
       </div>
-    </div>
+
+      <PrintableReport result={result} />
+    </>
   );
 }
 

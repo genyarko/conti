@@ -67,3 +67,237 @@ body {
   background-size: 800px 100%;
   @apply animate-shimmer rounded;
 }
+
+/* ---------- Print styles ----------
+   Triggered by window.print() from the "Download PDF" button. The user picks
+   "Save as PDF" in the browser print dialog. The interactive dashboard is
+   hidden via `print:hidden` (Tailwind), and PrintableReport is shown via
+   `hidden print:block`. */
+@media print {
+  @page {
+    size: A4;
+    margin: 18mm 15mm;
+  }
+
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    background-image: none !important;
+    color: #111827 !important;
+    font-size: 10.5pt;
+    line-height: 1.45;
+  }
+
+  /* Strip the dark-mode body radial gradients in print. */
+  body::before,
+  body::after {
+    display: none !important;
+  }
+
+  .printable-report {
+    color: #111827;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  .print-header {
+    border-bottom: 1.5pt solid #111827;
+    padding-bottom: 6pt;
+    margin-bottom: 14pt;
+  }
+
+  .print-eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 8pt;
+    color: #475569;
+  }
+
+  .print-h1 {
+    font-size: 18pt;
+    font-weight: 700;
+    margin: 4pt 0 2pt;
+  }
+
+  .print-subline {
+    font-size: 9pt;
+    color: #475569;
+  }
+
+  .print-section {
+    margin-top: 12pt;
+    page-break-inside: auto;
+  }
+
+  .print-h2 {
+    font-size: 13pt;
+    font-weight: 700;
+    border-bottom: 0.5pt solid #cbd5e1;
+    padding-bottom: 3pt;
+    margin-bottom: 8pt;
+    page-break-after: avoid;
+  }
+
+  .print-h3 {
+    font-size: 11pt;
+    font-weight: 600;
+    margin: 10pt 0 4pt;
+    page-break-after: avoid;
+  }
+
+  .print-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10pt;
+    margin-bottom: 6pt;
+  }
+
+  .print-row {
+    display: flex;
+    gap: 10pt;
+    margin: 4pt 0;
+  }
+
+  .print-label {
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748b;
+    margin-bottom: 1pt;
+  }
+
+  .print-value {
+    font-size: 12pt;
+    font-weight: 600;
+  }
+
+  .print-paragraph {
+    margin: 6pt 0;
+    font-size: 10.5pt;
+  }
+
+  .print-counts {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8pt;
+    font-size: 9.5pt;
+  }
+
+  .print-counts th,
+  .print-counts td {
+    border: 0.5pt solid #cbd5e1;
+    padding: 4pt 6pt;
+    text-align: center;
+  }
+
+  .print-counts th {
+    background: #f1f5f9;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 8pt;
+  }
+
+  .print-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .print-clause {
+    margin-bottom: 8pt;
+    page-break-inside: auto;
+  }
+
+  .print-card {
+    border: 0.5pt solid #cbd5e1;
+    border-left: 2pt solid #94a3b8;
+    border-radius: 3pt;
+    padding: 6pt 8pt;
+    margin: 6pt 0;
+    page-break-inside: avoid;
+    background: #ffffff;
+  }
+
+  .print-card-removed {
+    border-left-color: #ef4444;
+    background: #fef2f2;
+  }
+
+  .print-card-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6pt;
+    margin-bottom: 3pt;
+  }
+
+  .print-card-title {
+    font-weight: 600;
+    font-size: 10.5pt;
+    flex: 1;
+  }
+
+  .print-card-body {
+    margin: 2pt 0;
+    font-size: 10pt;
+  }
+
+  .print-card-rec {
+    margin: 3pt 0 0;
+    font-size: 9.5pt;
+    color: #1e293b;
+  }
+
+  .print-quote {
+    border-left: 2pt solid #94a3b8;
+    padding: 2pt 8pt;
+    margin: 4pt 0;
+    font-style: italic;
+    font-size: 9.5pt;
+    color: #334155;
+    background: #f8fafc;
+  }
+
+  .print-pill {
+    display: inline-block;
+    padding: 1pt 5pt;
+    border-radius: 999pt;
+    font-size: 8pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: 0.5pt solid;
+  }
+
+  .print-pill-critical { color: #b91c1c; border-color: #fca5a5; background: #fee2e2; }
+  .print-pill-warning  { color: #c2410c; border-color: #fdba74; background: #ffedd5; }
+  .print-pill-info     { color: #0369a1; border-color: #7dd3fc; background: #e0f2fe; }
+  .print-pill-ok       { color: #047857; border-color: #6ee7b7; background: #d1fae5; }
+
+  .print-pill-verify-verified      { color: #047857; border-color: #6ee7b7; background: #d1fae5; }
+  .print-pill-verify-uncertain     { color: #a16207; border-color: #fcd34d; background: #fef3c7; }
+  .print-pill-verify-flagged       { color: #c2410c; border-color: #fdba74; background: #ffedd5; }
+  .print-pill-verify-hallucination { color: #b91c1c; border-color: #fca5a5; background: #fee2e2; }
+  .print-pill-verify-unchecked     { color: #475569; border-color: #cbd5e1; background: #f1f5f9; }
+  .print-pill-removed              { color: #b91c1c; border-color: #fca5a5; background: #fee2e2; }
+
+  .print-empty {
+    color: #475569;
+    font-style: italic;
+    font-size: 10pt;
+    margin: 4pt 0;
+  }
+
+  .print-footer {
+    margin-top: 16pt;
+    padding-top: 6pt;
+    border-top: 0.5pt solid #cbd5e1;
+    font-size: 8.5pt;
+    color: #64748b;
+    text-align: center;
+  }
+}
