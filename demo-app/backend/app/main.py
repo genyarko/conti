@@ -17,6 +17,7 @@ from app.models.schemas import (
     AnalyzeResponse,
     UploadResponse,
 )
+from app.services import llm_factory
 from app.services.contract_store import store
 from app.services.ingest import ingest_bytes, ingest_text
 from app.services.pipeline import AnalysisPipeline
@@ -31,12 +32,26 @@ log = logging.getLogger("trustlayer.demo")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
-        "Contract reviewer demo starting — trustlayer=%s anthropic_model=%s",
+        "Contract reviewer demo starting — trustlayer=%s default=%s/%s multimodal=%s",
         settings.trustlayer_base_url,
-        settings.anthropic_model,
+        settings.default_provider,
+        settings.default_model,
+        settings.multimodal_enabled,
     )
-    if not settings.anthropic_api_key:
-        log.warning("ANTHROPIC_API_KEY is not set — /analyze will fail.")
+    google_configured = bool(settings.gemini_api_key) or (
+        settings.gemini_use_vertex and bool(settings.gemini_project)
+    )
+    if not settings.anthropic_api_key and not google_configured:
+        log.warning(
+            "No provider is configured (ANTHROPIC_API_KEY / GEMINI_API_KEY / "
+            "GEMINI_USE_VERTEX+GEMINI_PROJECT) — /analyze will fail."
+        )
+    elif not google_configured and settings.default_provider == "google":
+        log.warning(
+            "DEFAULT_PROVIDER=google but neither GEMINI_API_KEY nor "
+            "GEMINI_USE_VERTEX+GEMINI_PROJECT is configured — "
+            "/analyze will fail unless callers pass an Anthropic override."
+        )
     if not settings.api_auth_token:
         log.warning(
             "API_AUTH_TOKEN is not set — /upload, /analyze, /samples/*/load are "
@@ -156,7 +171,20 @@ async def health():
     return {
         "status": "ok",
         "trustlayer_base_url": settings.trustlayer_base_url,
-        "anthropic_configured": bool(settings.anthropic_api_key),
+        "default_provider": settings.default_provider,
+        "default_model": settings.default_model,
+        "providers": {
+            "anthropic": {"configured": bool(settings.anthropic_api_key)},
+            "google": {
+                "configured": bool(settings.gemini_api_key)
+                or (
+                    settings.gemini_use_vertex
+                    and bool(settings.gemini_project)
+                ),
+                "mode": "vertex" if settings.gemini_use_vertex else "ai-studio",
+            },
+        },
+        "multimodal_enabled": settings.multimodal_enabled,
         "contracts_in_store": len(store),
     }
 
@@ -187,12 +215,18 @@ async def upload_contract(
         contract = ingest_bytes(content, filename=file.filename, content_type=file.content_type)
     else:
         assert text is not None
-        _enforce_upload_size(len(text.encode("utf-8")))
+        content = text.encode("utf-8")
+        _enforce_upload_size(len(content))
         contract = ingest_text(text, filename=filename or "pasted.txt")
 
     _enforce_char_limit(len(contract.raw_text))
 
-    store.put(contract)
+    # Retain the original PDF bytes so /analyze can render pages multimodally
+    # without re-uploading. Non-PDF uploads don't need this and skip the cost.
+    if contract.doc_type == "pdf":
+        store.put_with_bytes(contract, content)
+    else:
+        store.put(contract)
     return UploadResponse(
         contract_id=contract.contract_id,
         filename=contract.filename,
@@ -240,8 +274,64 @@ async def analyze_contract(request: AnalyzeRequest) -> AnalyzeResponse:
             },
         )
 
+    image_parts = _render_multimodal_parts(contract.contract_id, contract, request)
+
     pipeline = AnalysisPipeline()
-    return await pipeline.run(contract, skip_verification=request.skip_verification)
+    return await pipeline.run(
+        contract,
+        skip_verification=request.skip_verification,
+        provider=request.provider,
+        model=request.model,
+        image_parts=image_parts,
+    )
+
+
+def _render_multimodal_parts(
+    contract_id: str,
+    contract,
+    request: AnalyzeRequest,
+):
+    """Render PDF pages to PNGs for the analyzer, when conditions allow.
+
+    Returns None when multimodal is disabled, the doc isn't a PDF, the chosen
+    provider doesn't support image inputs, or the original bytes weren't
+    retained (e.g. text-only flows).
+    """
+    multimodal = (
+        request.multimodal
+        if request.multimodal is not None
+        else settings.multimodal_enabled
+    )
+    if not multimodal:
+        return None
+    if contract.doc_type != "pdf":
+        return None
+
+    resolved = llm_factory.resolve(
+        provider=request.provider, model=request.model
+    )
+    if not llm_factory.supports_multimodal(resolved.provider):
+        return None
+
+    raw = store.get_raw_bytes(contract_id)
+    if raw is None:
+        return None
+
+    from app.services.pdf_to_images import render_pdf_pages, to_image_parts
+
+    try:
+        images = render_pdf_pages(
+            raw,
+            max_pages=settings.multimodal_max_pages,
+            dpi=settings.multimodal_render_dpi,
+        )
+    except Exception:
+        log.exception("PDF page rendering failed; falling back to text-only path.")
+        return None
+
+    if not images:
+        return None
+    return to_image_parts(images)
 
 
 @app.get("/samples", tags=["samples"], summary="List bundled demo contracts.")

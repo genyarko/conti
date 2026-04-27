@@ -1,5 +1,36 @@
 from __future__ import annotations
 
+from typing import Any
+
+# Response schema for the grounder. Sent to Gemini via `response_schema`;
+# mirrored in prose form inside the system prompt for Anthropic models.
+GROUNDER_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "support": {
+            "type": "string",
+            "enum": ["full", "partial", "none"],
+        },
+        "matched_passage": {
+            "type": "string",
+            "description": (
+                "Shortest verbatim slice of the source that supports the "
+                "claim. Empty string when support is 'none'."
+            ),
+        },
+        "confidence": {
+            "type": "integer",
+            "description": "0–100 confidence in the support verdict.",
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "One concise sentence justifying the verdict.",
+        },
+    },
+    "required": ["support", "confidence", "reasoning"],
+}
+
+
 GROUNDER_SYSTEM_PROMPT = """You are a strict grounding verifier for an LLM-output verification pipeline.
 
 Given a single CLAIM and a SOURCE text, decide whether the source supports the claim — either explicitly or through minimal, unambiguous inference.

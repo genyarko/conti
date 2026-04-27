@@ -6,7 +6,9 @@ from typing import Any, Optional, Protocol
 from anthropic import AsyncAnthropic
 
 
-class ClaudeClient(Protocol):
+class LLMClient(Protocol):
+    """Provider-agnostic interface every demo-app adapter implements."""
+
     async def create_message(
         self,
         *,
@@ -27,6 +29,10 @@ class ClaudeClient(Protocol):
         tool_description: str,
         input_schema: dict[str, Any],
     ) -> dict[str, Any]: ...
+
+
+# Back-compat alias: callers import `ClaudeClient`.
+ClaudeClient = LLMClient
 
 
 @dataclass

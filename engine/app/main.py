@@ -70,12 +70,30 @@ _trace_store = TraceStore(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
-        "TrustLayer engine starting (env=%s, model=%s)",
+        "TrustLayer engine starting (env=%s, default=%s/%s)",
         settings.engine_env,
-        settings.anthropic_model,
+        settings.default_provider,
+        settings.default_model,
     )
-    if not settings.anthropic_api_key:
-        log.warning("ANTHROPIC_API_KEY is not set — pipeline calls will fail.")
+    google_configured = bool(settings.gemini_api_key) or (
+        settings.gemini_use_vertex and bool(settings.gemini_project)
+    )
+    if not settings.anthropic_api_key and not google_configured:
+        log.warning(
+            "No provider is configured (ANTHROPIC_API_KEY / GEMINI_API_KEY / "
+            "GEMINI_USE_VERTEX+GEMINI_PROJECT) — pipeline calls will fail."
+        )
+    elif not google_configured and settings.default_provider == "google":
+        log.warning(
+            "DEFAULT_PROVIDER=google but neither GEMINI_API_KEY nor "
+            "GEMINI_USE_VERTEX+GEMINI_PROJECT is configured — "
+            "default-provider verifications will fail."
+        )
+    elif not settings.anthropic_api_key and settings.default_provider == "anthropic":
+        log.warning(
+            "DEFAULT_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set — "
+            "default-provider verifications will fail."
+        )
     if not settings.api_auth_token:
         log.warning(
             "API_AUTH_TOKEN is not set — /verify endpoints are UNAUTHENTICATED. "
@@ -318,6 +336,16 @@ def _cache_put(key: str, report: IntegrityReport) -> None:
         _report_cache.set(key, report.model_dump(mode="json"))
 
 
+def _resolved_cache_parts(provider: Optional[str], model: Optional[str]) -> tuple[str, str]:
+    """Pick the (provider, model) the pipeline will actually run on, so the
+    cache key reflects what was computed. Without this, two callers asking
+    for different models on the same input would see each other's results."""
+    from engine.app.services.llm_factory import resolve as _resolve_llm
+
+    resolved = _resolve_llm(provider=provider, model=model)
+    return resolved.provider, resolved.model
+
+
 def _stash_usage(http_request: Request, report: IntegrityReport) -> None:
     http_request.state.metrics_usage = {
         "input_tokens": report.metadata.input_tokens,
@@ -400,10 +428,17 @@ def _emit_audit_for_batch(
         claim_count += item.report.metadata.claim_count or len(item.report.claims)
         for key in outcome_counts:
             outcome_counts[key] += len(getattr(item.report, key))
+    # Pull the resolved model from the first OK report so the audit row
+    # records what actually ran, not whatever ANTHROPIC_MODEL was set to.
+    batch_model = settings.default_model
+    for item in results:
+        if item.report is not None:
+            batch_model = item.report.metadata.model
+            break
     record = build_verify_record(
         request_id=batch_id,
         endpoint="/verify/batch",
-        model=settings.anthropic_model,
+        model=batch_model,
         status_code=200,
         latency_ms=duration_ms,
         overall_score=None,
@@ -445,14 +480,48 @@ async def health() -> dict:
     return {
         "status": "ok",
         "env": settings.engine_env,
-        "model": settings.anthropic_model,
-        "anthropic_configured": bool(settings.anthropic_api_key),
+        "default_provider": settings.default_provider,
+        "default_model": settings.default_model,
+        "providers": {
+            "anthropic": {"configured": bool(settings.anthropic_api_key)},
+            "google": {
+                "configured": bool(settings.gemini_api_key)
+                or (
+                    settings.gemini_use_vertex
+                    and bool(settings.gemini_project)
+                ),
+                "mode": "vertex" if settings.gemini_use_vertex else "ai-studio",
+            },
+        },
         "cache": {
             "enabled": settings.cache_enabled,
             "size": len(_report_cache),
             "hits": _report_cache.hits,
             "misses": _report_cache.misses,
         },
+    }
+
+
+@app.get(
+    "/models",
+    tags=["meta"],
+    summary="Catalog of supported (provider, model) pairs for client UIs.",
+    description=(
+        "Returns the catalog of models the engine accepts on `/verify*` "
+        "requests, with the per-provider availability flag (`available: false` "
+        "when the provider's API key is unset). The frontend ModelSelector "
+        "reads this list and greys out unusable options."
+    ),
+)
+async def models() -> dict:
+    from engine.app.services.models import list_models
+
+    return {
+        "default": {
+            "provider": settings.default_provider,
+            "model": settings.default_model,
+        },
+        "models": list_models(),
     }
 
 
@@ -471,7 +540,8 @@ async def stats() -> dict:
     total_misses = _report_cache.misses
     lookups = total_hits + total_misses
     return {
-        "model": settings.anthropic_model,
+        "default_provider": settings.default_provider,
+        "default_model": settings.default_model,
         "cache": {
             "enabled": settings.cache_enabled,
             "size": len(_report_cache),
@@ -621,7 +691,10 @@ _VERIFY_EXAMPLE = {
 )
 async def verify(request: VerifyRequest, http_request: Request) -> IntegrityReport:
     _enforce_size(request.source_context, request.llm_output)
-    key = make_cache_key("full", request.source_context, request.llm_output)
+    provider, model = _resolved_cache_parts(request.provider, request.model)
+    key = make_cache_key(
+        "full", provider, model, request.source_context, request.llm_output
+    )
     cached = _cached_or_run(key)
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
@@ -655,7 +728,10 @@ async def verify_quick(
     request: VerifyQuickRequest, http_request: Request
 ) -> IntegrityReport:
     _enforce_size(request.source_context, request.llm_output)
-    key = make_cache_key("quick", request.source_context, request.llm_output)
+    provider, model = _resolved_cache_parts(request.provider, request.model)
+    key = make_cache_key(
+        "quick", provider, model, request.source_context, request.llm_output
+    )
     cached = _cached_or_run(key)
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
@@ -700,8 +776,11 @@ async def verify_claims(
     _enforce_claim_count(len(request.claims))
 
     claims = [_to_claim(ci) for ci in request.claims]
+    provider, model = _resolved_cache_parts(request.provider, request.model)
     key = make_cache_key(
         "claims",
+        provider,
+        model,
         request.source_context,
         "\n".join(f"{c.id}::{c.category.value}::{c.text}" for c in claims),
     )
@@ -713,7 +792,12 @@ async def verify_claims(
         return report
 
     pipeline = VerifyPipeline()
-    report = await pipeline.run_with_claims(request.source_context, claims)
+    report = await pipeline.run_with_claims(
+        request.source_context,
+        claims,
+        provider=request.provider,
+        model=request.model,
+    )
     _cache_put(key, report)
     _stash_usage(http_request, report)
     _save_trace(endpoint="/verify/claims", report=report, evidence=pipeline.last_evidence)
@@ -785,7 +869,14 @@ async def verify_batch(
     t0 = time.perf_counter()
     results = await asyncio.gather(
         *(
-            _process_batch_item(idx, item, mode, semaphore)
+            _process_batch_item(
+                idx,
+                item,
+                mode,
+                semaphore,
+                provider=request.provider,
+                model=request.model,
+            )
             for idx, item in enumerate(request.items)
         )
     )
@@ -827,11 +918,19 @@ async def _process_batch_item(
     item: VerifyBatchItem,
     mode: str,
     semaphore: asyncio.Semaphore,
+    *,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> BatchItemResult:
     async with semaphore:
         try:
+            cache_provider, cache_model = _resolved_cache_parts(provider, model)
             key = make_cache_key(
-                f"batch:{mode}", item.source_context, item.llm_output
+                f"batch:{mode}",
+                cache_provider,
+                cache_model,
+                item.source_context,
+                item.llm_output,
             )
             cached = _cached_or_run(key)
             if cached is not None:
@@ -842,12 +941,16 @@ async def _process_batch_item(
                     req = VerifyQuickRequest(
                         source_context=item.source_context,
                         llm_output=item.llm_output,
+                        provider=provider,
+                        model=model,
                     )
                     report = await pipeline.run_quick(req)
                 else:
                     req = VerifyRequest(
                         source_context=item.source_context,
                         llm_output=item.llm_output,
+                        provider=provider,
+                        model=model,
                     )
                     report = await pipeline.run(req)
                 _cache_put(key, report)

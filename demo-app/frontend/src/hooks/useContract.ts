@@ -7,6 +7,7 @@ import {
   ContractApiError,
 } from "../services/contract";
 import type { AnalyzeResponse, UploadResponse } from "../types/contract";
+import type { ModelPick } from "../types/models";
 
 export type AnalyzeStage =
   | "idle"
@@ -32,7 +33,11 @@ export interface UseContractState {
   uploadFromFile: (file: File) => Promise<void>;
   uploadFromText: (text: string, filename?: string) => Promise<void>;
   loadFromSample: (name: string) => Promise<void>;
-  analyzeNow: (opts?: { skipVerification?: boolean }) => Promise<void>;
+  analyzeNow: (opts?: {
+    skipVerification?: boolean;
+    pick?: ModelPick | null;
+    multimodal?: boolean;
+  }) => Promise<void>;
   reset: () => void;
 }
 
@@ -134,7 +139,11 @@ export function useContract(): UseContractState {
   }, []);
 
   const analyzeNow = useCallback(
-    async (opts?: { skipVerification?: boolean }) => {
+    async (opts?: {
+      skipVerification?: boolean;
+      pick?: ModelPick | null;
+      multimodal?: boolean;
+    }) => {
       abortRef.current?.abort();
       clearTickers();
       const ctrl = new AbortController();
@@ -170,6 +179,9 @@ export function useContract(): UseContractState {
           {
             contract_id: upload.contract_id,
             skip_verification: opts?.skipVerification,
+            provider: opts?.pick?.provider,
+            model: opts?.pick?.model,
+            multimodal: opts?.multimodal,
           },
           ctrl.signal,
         );

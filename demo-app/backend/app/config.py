@@ -26,6 +26,46 @@ class Settings(BaseSettings):
     )
     anthropic_max_tokens: int = Field(default=16384, alias="ANTHROPIC_MAX_TOKENS")
 
+    # --- Google Gemini ---
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(
+        default="gemini-3.1-pro-preview", alias="GEMINI_MODEL"
+    )
+    gemini_fast_model: str = Field(
+        default="gemini-3-flash-preview", alias="GEMINI_FAST_MODEL"
+    )
+    gemini_max_tokens: int = Field(default=16384, alias="GEMINI_MAX_TOKENS")
+    # Vertex AI / "Agent Platform" path: bills via Cloud project (uses trial
+    # credit) instead of AI Studio prepay. Auth via Application Default
+    # Credentials — no api_key needed when this flag is on.
+    gemini_use_vertex: bool = Field(default=False, alias="GEMINI_USE_VERTEX")
+    gemini_project: str = Field(default="", alias="GEMINI_PROJECT")
+    # `global` is required for the 3.x preview models the codebase defaults to;
+    # regional endpoints only serve GA models.
+    gemini_location: str = Field(default="global", alias="GEMINI_LOCATION")
+    # Service-account JSON (contents of a key file). Production deploys set
+    # this; locally we fall back to gcloud Application Default Credentials.
+    google_credentials_json: str = Field(
+        default="", alias="GOOGLE_APPLICATION_CREDENTIALS_JSON"
+    )
+
+    # --- Default provider/model for the contract demo ---
+    # Gemini Pro is the analyzer default because it can read PDF pages
+    # multimodally (Phase G3). Override with DEFAULT_PROVIDER/DEFAULT_MODEL.
+    default_provider: Literal["anthropic", "google"] = Field(
+        default="google", alias="DEFAULT_PROVIDER"
+    )
+    default_model: str = Field(
+        default="gemini-3.1-pro-preview", alias="DEFAULT_MODEL"
+    )
+
+    # --- Multimodal contract ingestion (Phase G3) ---
+    # When the demo backend renders PDF pages to images for Gemini, cap the
+    # per-page render DPI and the total number of pages we send.
+    multimodal_enabled: bool = Field(default=True, alias="MULTIMODAL_ENABLED")
+    multimodal_max_pages: int = Field(default=25, alias="MULTIMODAL_MAX_PAGES")
+    multimodal_render_dpi: int = Field(default=144, alias="MULTIMODAL_RENDER_DPI")
+
     # --- TrustLayer engine ---
     trustlayer_base_url: str = Field(
         default="http://localhost:8000", alias="TRUSTLAYER_BASE_URL"

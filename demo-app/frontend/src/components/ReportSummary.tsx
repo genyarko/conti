@@ -86,9 +86,12 @@ function Stat({
 
 function MetaRow({ report }: { report: IntegrityReport }) {
   const m = report.metadata;
+  const providerLabel = m.provider
+    ? `${formatProvider(m.provider)} · ${m.model}`
+    : m.model;
   const items: [string, string][] = [
     ["Claims", String(m.claim_count)],
-    ["Model", m.model],
+    ["Model", providerLabel],
     ["Duration", `${(m.duration_ms / 1000).toFixed(1)}s`],
     ["Request", m.request_id],
   ];
@@ -102,4 +105,10 @@ function MetaRow({ report }: { report: IntegrityReport }) {
       ))}
     </div>
   );
+}
+
+function formatProvider(p: string): string {
+  if (p === "google") return "Google";
+  if (p === "anthropic") return "Anthropic";
+  return p;
 }

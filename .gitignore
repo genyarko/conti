@@ -42,3 +42,6 @@ coverage/
 
 # Runtime audit log (JSONL)
 engine/logs/
+
+.vercel
+.env*.local

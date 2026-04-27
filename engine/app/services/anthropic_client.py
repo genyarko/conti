@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 from anthropic import AsyncAnthropic
 
@@ -35,7 +35,17 @@ class TokenLedger:
         self.usage = TokenUsage()
 
 
-class ClaudeClient(Protocol):
+class LLMClient(Protocol):
+    """Provider-agnostic interface every adapter (Anthropic, Gemini, …) implements.
+
+    `response_schema` is the JSON schema callers expect the response to match.
+    Providers that natively enforce structured output (Gemini) MUST pass it
+    through; providers that don't (Anthropic) MAY ignore it — the prose schema
+    inside their system prompts already steers the model.
+    """
+
+    last_usage: TokenUsage
+
     async def create_message(
         self,
         *,
@@ -43,7 +53,12 @@ class ClaudeClient(Protocol):
         user: str,
         model: str,
         max_tokens: int,
+        response_schema: Optional[dict[str, Any]] = None,
     ) -> str: ...
+
+
+# Back-compat alias: existing call sites import `ClaudeClient`.
+ClaudeClient = LLMClient
 
 
 @dataclass
@@ -70,7 +85,13 @@ class AnthropicClient:
         user: str,
         model: str,
         max_tokens: int,
+        response_schema: Optional[dict[str, Any]] = None,
     ) -> str:
+        # Anthropic's messages API doesn't take a structured-output schema —
+        # the prompt itself already says "respond with JSON only", and tests
+        # rely on that. We accept the kwarg for protocol parity with Gemini
+        # so the same call site works across providers.
+        del response_schema
         assert self._client is not None
         resp = await self._client.messages.create(
             model=model,

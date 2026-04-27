@@ -24,6 +24,40 @@ class Settings(BaseSettings):
     )
     anthropic_max_tokens: int = Field(default=4096, alias="ANTHROPIC_MAX_TOKENS")
 
+    # --- Google Gemini ---
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(
+        default="gemini-3.1-pro-preview", alias="GEMINI_MODEL"
+    )
+    gemini_fast_model: str = Field(
+        default="gemini-3-flash-preview", alias="GEMINI_FAST_MODEL"
+    )
+    gemini_max_tokens: int = Field(default=4096, alias="GEMINI_MAX_TOKENS")
+    # Vertex AI / "Gemini Enterprise" path: bills through Cloud (uses trial
+    # credit) instead of AI Studio's prepay pool. Auth comes from
+    # Application Default Credentials (gcloud auth application-default login),
+    # so no api_key is required when this flag is on.
+    gemini_use_vertex: bool = Field(default=False, alias="GEMINI_USE_VERTEX")
+    gemini_project: str = Field(default="", alias="GEMINI_PROJECT")
+    # `global` is required for the 3.x preview models the codebase defaults to;
+    # regional endpoints (us-central1, europe-west4, …) only serve GA models.
+    gemini_location: str = Field(default="global", alias="GEMINI_LOCATION")
+    # Service-account JSON (the contents of a key file). Production deploys
+    # set this; locally we fall back to gcloud Application Default Credentials.
+    google_credentials_json: str = Field(
+        default="", alias="GOOGLE_APPLICATION_CREDENTIALS_JSON"
+    )
+
+    # --- Default provider/model (server-side safe default) ---
+    # When a caller omits provider/model on /verify*, the engine resolves to
+    # this pair. Gemini Flash is the cheapest safe option across providers.
+    default_provider: Literal["anthropic", "google"] = Field(
+        default="google", alias="DEFAULT_PROVIDER"
+    )
+    default_model: str = Field(
+        default="gemini-3-flash-preview", alias="DEFAULT_MODEL"
+    )
+
     # --- Server ---
     engine_host: str = Field(default="0.0.0.0", alias="ENGINE_HOST")
     engine_port: int = Field(default=8000, alias="ENGINE_PORT")

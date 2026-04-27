@@ -1,6 +1,61 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
+
+# Response schema for the per-claim consistency check. Sent to Gemini via
+# `response_schema`; mirrored in prose form in the system prompt for Anthropic.
+CONSISTENCY_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": [
+                "consistent",
+                "minor_concern",
+                "inconsistent",
+                "contradictory",
+            ],
+        },
+        "confidence": {
+            "type": "integer",
+            "description": "Integer 1–10 (10 = certain, 1 = guessing).",
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "One concise sentence justifying the verdict.",
+        },
+    },
+    "required": ["verdict", "confidence", "reasoning"],
+}
+
+# Response schema for the contradiction-detection pass over a list of claims.
+CONTRADICTION_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "contradictions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim_a": {
+                        "type": "string",
+                        "description": "id of the first claim.",
+                    },
+                    "claim_b": {
+                        "type": "string",
+                        "description": "id of the second claim.",
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "One concise sentence on why they conflict.",
+                    },
+                },
+                "required": ["claim_a", "claim_b", "reasoning"],
+            },
+        },
+    },
+    "required": ["contradictions"],
+}
 
 
 CONSISTENCY_SYSTEM_PROMPT = """You are a skeptical senior reviewer auditing an LLM output against its source context.

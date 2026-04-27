@@ -19,7 +19,8 @@ from app.prompts.analyzer_prompt import (
     ANALYZER_TOOL_SCHEMA,
     build_analyzer_user_prompt,
 )
-from app.services.anthropic_client import AnthropicClient, ClaudeClient
+from app.services import llm_factory
+from app.services.anthropic_client import LLMClient
 
 log = logging.getLogger(__name__)
 
@@ -36,20 +37,38 @@ class AnalysisResult:
 class ContractAnalyzer:
     def __init__(
         self,
-        client: Optional[ClaudeClient] = None,
+        client: Optional[LLMClient] = None,
         *,
+        provider: Optional[str] = None,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
     ) -> None:
-        self._client = client or AnthropicClient(api_key=settings.anthropic_api_key)
-        self._model = model or settings.anthropic_model
+        if client is None:
+            resolved = llm_factory.resolve(provider=provider, model=model)
+            self._client = llm_factory.get_client(resolved.provider)
+            self._provider = resolved.provider
+            self._model = model or resolved.model
+        else:
+            self._client = client
+            # Best-effort provider tag for caller-injected clients (used to
+            # decide whether multimodal image_parts are accepted).
+            self._provider = (
+                provider
+                or ("google" if "gemini" in type(client).__name__.lower() else "anthropic")
+            )
+            self._model = model or settings.default_model
         self._max_tokens = max_tokens or settings.anthropic_max_tokens
+
+    @property
+    def supports_multimodal(self) -> bool:
+        return llm_factory.supports_multimodal(self._provider)  # type: ignore[arg-type]
 
     async def analyze(
         self,
         clauses: list[Clause],
         *,
         filename: str | None = None,
+        image_parts: Optional[list[tuple[bytes, str]]] = None,
     ) -> AnalysisResult:
         if not clauses:
             return AnalysisResult(
@@ -64,7 +83,11 @@ class ContractAnalyzer:
         ]
         user_prompt = build_analyzer_user_prompt(payload, filename=filename)
 
-        parsed = await self._client.create_with_tool(
+        # Multimodal images are only forwarded when the provider supports them
+        # (Gemini today). Anthropic also supports image inputs but the demo's
+        # tool schema and prompt are tuned for the text-clause path; we'd
+        # need a separate prompt to flip Anthropic into multimodal mode too.
+        kwargs: dict[str, Any] = dict(
             system=ANALYZER_SYSTEM_PROMPT,
             user=user_prompt,
             model=self._model,
@@ -73,6 +96,17 @@ class ContractAnalyzer:
             tool_description=ANALYZER_TOOL_DESCRIPTION,
             input_schema=ANALYZER_TOOL_SCHEMA,
         )
+        if image_parts and self.supports_multimodal:
+            kwargs["image_parts"] = image_parts
+        elif image_parts and not self.supports_multimodal:
+            log.info(
+                "analyzer: dropping %d image part(s) — provider %r does not "
+                "support multimodal in this codebase.",
+                len(image_parts),
+                self._provider,
+            )
+
+        parsed = await self._client.create_with_tool(**kwargs)
 
         clause_index = {c.section_id: c for c in clauses}
         raw_findings = [

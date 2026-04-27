@@ -11,6 +11,26 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      # --- Provider config (Gemini via Vertex AI is the demo default) ---
+      - key: DEFAULT_PROVIDER
+        value: google
+      - key: DEFAULT_MODEL
+        value: gemini-3-flash-preview
+      - key: GEMINI_USE_VERTEX
+        value: "true"
+      - key: GEMINI_PROJECT
+        value: project-14eb89f6-442e-47d4-982
+      - key: GEMINI_LOCATION
+        value: global
+      - key: GEMINI_MODEL
+        value: gemini-3.1-pro-preview
+      - key: GEMINI_FAST_MODEL
+        value: gemini-3-flash-preview
+      # Paste the full service-account JSON (the file contents) here in the
+      # Render dashboard. Don't commit it.
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false
+      # --- Anthropic kept as a fallback provider ---
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: ANTHROPIC_MODEL
@@ -38,6 +58,24 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      # --- Provider config (Gemini via Vertex AI; multimodal contract demo) ---
+      - key: DEFAULT_PROVIDER
+        value: google
+      - key: DEFAULT_MODEL
+        value: gemini-3.1-pro-preview
+      - key: GEMINI_USE_VERTEX
+        value: "true"
+      - key: GEMINI_PROJECT
+        value: project-14eb89f6-442e-47d4-982
+      - key: GEMINI_LOCATION
+        value: global
+      - key: GEMINI_MODEL
+        value: gemini-3.1-pro-preview
+      - key: GEMINI_FAST_MODEL
+        value: gemini-3-flash-preview
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false
+      # --- Anthropic kept as a fallback provider ---
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: ANTHROPIC_MODEL

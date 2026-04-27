@@ -23,6 +23,14 @@ export default function ContractSummary({ result }: Props) {
     if (m.risk in counts) counts[m.risk as keyof typeof counts] += 1;
   }
 
+  const analyzerMeta = (result.metadata?.analyzer ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const analyzerProvider = (analyzerMeta.provider as string | undefined) ?? "";
+  const analyzerModel = (analyzerMeta.model as string | undefined) ?? "";
+  const analyzerMultimodal = Boolean(analyzerMeta.multimodal);
+
   return (
     <div className="card p-6 space-y-6 animate-fade-in">
       <div className="flex flex-col lg:flex-row items-start gap-6">
@@ -39,6 +47,13 @@ export default function ContractSummary({ result }: Props) {
             <span className="text-xs text-slate-500 font-mono truncate">
               {result.filename}
             </span>
+            {analyzerProvider && analyzerModel && (
+              <ProviderBadge
+                provider={analyzerProvider}
+                model={analyzerModel}
+                multimodal={analyzerMultimodal}
+              />
+            )}
           </div>
           {summary.plain_language_summary && (
             <p className="text-sm text-slate-300 leading-relaxed">
@@ -100,6 +115,34 @@ export default function ContractSummary({ result }: Props) {
         </div>
       )}
     </div>
+  );
+}
+
+function ProviderBadge({
+  provider,
+  model,
+  multimodal,
+}: {
+  provider: string;
+  model: string;
+  multimodal: boolean;
+}) {
+  const label =
+    provider === "google"
+      ? "Google"
+      : provider === "anthropic"
+        ? "Anthropic"
+        : provider;
+  return (
+    <span className="inline-flex items-center gap-2 rounded-full border border-line bg-surface/80 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-slate-300">
+      <span className="text-slate-400">{label}</span>
+      <span className="text-slate-200">{model}</span>
+      {multimodal && (
+        <span className="rounded-sm bg-emerald-500/20 px-1 text-[9px] text-emerald-300">
+          multimodal
+        </span>
+      )}
+    </span>
   );
 }
 

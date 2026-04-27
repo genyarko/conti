@@ -29,12 +29,28 @@ class AnalysisPipeline:
         contract: ParsedContract,
         *,
         skip_verification: bool = False,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        image_parts: Optional[list[tuple[bytes, str]]] = None,
     ) -> AnalyzeResponse:
-        analyzer = self.analyzer or ContractAnalyzer()
+        analyzer = self.analyzer or ContractAnalyzer(
+            provider=provider, model=model
+        )
 
         t0 = time.perf_counter()
-        analysis = await analyzer.analyze(contract.clauses, filename=contract.filename)
+        analysis = await analyzer.analyze(
+            contract.clauses,
+            filename=contract.filename,
+            image_parts=image_parts,
+        )
         analyze_ms = int((time.perf_counter() - t0) * 1000)
+        used_multimodal = bool(image_parts) and analyzer.supports_multimodal
+        analyzer_meta = {
+            "provider": getattr(analyzer, "_provider", None),
+            "model": getattr(analyzer, "_model", None),
+            "multimodal": used_multimodal,
+            "image_parts_count": len(image_parts) if image_parts else 0,
+        }
 
         all_findings = analysis.findings + analysis.missing_clauses
 
@@ -59,6 +75,7 @@ class AnalysisPipeline:
                     "analyze_ms": analyze_ms,
                     "verify_ms": 0,
                     "verification_skipped": True,
+                    "analyzer": {**analysis.metadata, **analyzer_meta},
                 },
             )
 
@@ -112,7 +129,7 @@ class AnalysisPipeline:
                 "num_findings": len(findings_bucket),
                 "num_removed": len(outcome.removed),
                 "num_missing_clauses": len(missing_bucket_unverified),
-                "analyzer": analysis.metadata,
+                "analyzer": {**analysis.metadata, **analyzer_meta},
             },
         )
 

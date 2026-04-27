@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useContract } from "../hooks/useContract";
+import { useModelCatalog } from "../hooks/useModelCatalog";
 import { listSamples } from "../services/contract";
 import type { SampleEntry } from "../types/contract";
 import { formatSampleName } from "../lib/contract";
 import ContractDashboardView from "./ContractDashboardView";
 import ContractSkeleton from "../components/ContractSkeleton";
+import ModelSelector from "../components/ModelSelector";
 
 export default function ContractUploadView() {
   const {
@@ -26,6 +28,7 @@ export default function ContractUploadView() {
   const [dragOver, setDragOver] = useState(false);
   const [pasted, setPasted] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const { catalog, pick, setPick } = useModelCatalog();
 
   useEffect(() => {
     let cancelled = false;
@@ -47,9 +50,9 @@ export default function ContractUploadView() {
   // Automatically analyze once upload succeeds.
   useEffect(() => {
     if (upload && !result && !isBusy && stage !== "error") {
-      analyzeNow();
+      analyzeNow({ pick });
     }
-  }, [upload, result, isBusy, stage, analyzeNow]);
+  }, [upload, result, isBusy, stage, analyzeNow, pick]);
 
   const onDrop = useCallback(
     (e: React.DragEvent<HTMLDivElement>) => {
@@ -100,6 +103,18 @@ export default function ContractUploadView() {
           before they reach you.
         </p>
       </section>
+
+      {catalog && (
+        <section className="flex flex-wrap items-center justify-end gap-3">
+          <ModelSelector
+            models={catalog.models}
+            pick={pick}
+            onChange={setPick}
+            disabled={isBusy}
+            label="Analyze with"
+          />
+        </section>
+      )}
 
       <section>
         <div

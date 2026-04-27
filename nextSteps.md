@@ -3,6 +3,8 @@
 > **Core product:** A general-purpose API that verifies any LLM output for hallucinations, ungrounded claims, and logical inconsistencies.  
 > **Showcase demo:** An AI Contract Reviewer powered by TrustLayer, proving the engine works on a high-stakes real-world use case.
 
+Re-tighten the org policies after deploy succeeds.
+
 ---
 
 ## Architecture
@@ -36,6 +38,108 @@
   Contract Reviewer     Chatbot Auditor      Research Verifier
   (hackathon demo)       (future app)          (future app)
 ```
+
+---
+
+## TOP PRIORITY: Gemini / Google AI Studio Track
+
+> **Hackathon track requirement.** The "Technology Partners" track requires the project to use **Gemini (via Google AI Studio or the Gemini API)** for reasoning, chat, or multimodal understanding, with an **agent-driven or automated workflow**. This track now takes precedence over all other phases. Anthropic Claude stays in the codebase as a secondary provider (proves "provider-agnostic" claim), but Gemini becomes the **default** for the live demo.
+
+### Pitch framing (what we tell the judges)
+
+- **Gemini is the agent brain.** Every reasoning step in the contract-reviewer demo — clause splitting, risk analysis, claim extraction, source grounding, consistency checking — runs on Gemini through an agent-driven pipeline.
+- **Multimodal is the differentiator.** Contracts arrive as PDFs that often contain scanned pages, signatures, stamps, marked-up redlines, and tables. Gemini Pro reads pages **as images**, not just text — catching things `pdfplumber` cannot. This is the demo moment that text-only tools lose.
+- **TrustLayer wraps Gemini in an integrity layer.** The agent doesn't just "use an LLM" — it self-verifies. Gemini Flash drives fast claim extraction and grounding; Gemini Pro drives deep reasoning and consistency checks; the verification report explains *why* each finding survived or got removed.
+- **Built and tuned in Google AI Studio.** All prompts (extractor, grounder, consistency, contract-analyst) get iterated in AI Studio first, then exported to the engine. We can show the AI Studio prompt history in the video as proof of workflow.
+
+### Model assignment (per pipeline stage)
+
+| Stage                              | Model                    | Why                                                                 |
+|-----------------------------------|--------------------------|---------------------------------------------------------------------|
+| Contract analyzer (demo backend)  | `gemini-3.1-pro-preview` | Multimodal — reads PDF pages directly; deep reasoning over clauses. |
+| Claim extractor                   | `gemini-3-flash-preview` | Cheap, fast structured-output decomposition.                        |
+| Source grounder (semantic check)  | `gemini-3-flash-preview` | High volume, low-stakes per call; latency matters.                  |
+| Consistency checker               | `gemini-3.1-pro-preview` | Skeptical-reviewer reasoning; quality > cost here.                  |
+| Server-side safe default          | `gemini-3-flash-preview` | Cheapest safe option when caller omits `(provider, model)`.         |
+
+Available Gemini 3.x preview models (as of 2026-04):
+- `gemini-3.1-pro-preview` (public preview, released 2026-02-19) — flagship reasoning + multimodal
+- `gemini-3.1-pro-preview-customtools` (public preview, released 2026-02-23) — tool-use variant; wire later if we add agent tool-calling
+- `gemini-3-flash-preview` (public preview, released 2025-12-17) — fast tier, default safe model
+
+Pin these IDs in `engine/config/settings.py` as `GEMINI_PRO_MODEL` / `GEMINI_FLASH_MODEL` so a single env-var change can flip to GA models when they ship.
+
+### Phase G1: Google AI Studio prompt prototyping (Day 1, ~2 hours, do first)
+
+1. Sign in to Google AI Studio, create a workspace, and generate a Gemini API key. Record it as `GEMINI_API_KEY` in `.env.example` and the team password manager.
+2. Port the four prompts to AI Studio chat sessions and tune until output is stable:
+   - `engine/app/prompts/extractor_prompt.py` → "Claim Extractor"
+   - `engine/app/prompts/grounder_prompt.py` (if separate) → "Source Grounder"
+   - `engine/app/prompts/consistency_prompt.py` → "Consistency Checker"
+   - `demo-app/backend/app/prompts/contract_analyst.py` (or wherever the analyst prompt lives) → "Contract Analyst"
+3. **Convert XML-tag scaffolding to JSON-schema responses.** Gemini handles structured output via `response_mime_type="application/json"` + `response_schema`, not Claude-style `<claim>` tags. Define schemas alongside each prompt.
+4. Test each prompt on three fixtures: a clean clause, a risky clause, a hallucinated finding. Save the prompt + schema + sample outputs as a single markdown file per stage in `engine/app/prompts/gemini/`.
+5. Save the AI Studio session links — they're shippable artifacts for the submission and visible proof of the "AI Studio" requirement.
+
+### Phase G2: Gemini provider adapter (Day 1, ~3 hours)
+
+Builds on Phase 12's provider-abstraction work, but Gemini is now the *first* non-Anthropic provider, not the second.
+
+1. Add `google-genai` (the new unified SDK) to `engine/pyproject.toml`. **Do not use** the older `google-generativeai` — it's the deprecated path; the new SDK is what AI Studio docs point at as of 2026.
+2. Create `engine/app/services/gemini_client.py` mirroring the `AnthropicClient` shape:
+   - Class `GeminiClient` with `async def create_message(*, system, user, model, max_tokens, response_schema=None) -> str`.
+   - Surface `last_usage: TokenUsage` from the SDK's `usage_metadata` (`prompt_token_count`, `candidates_token_count`).
+   - Map system prompts to `system_instruction`; map user prompts to a single `contents=[...]` user turn.
+   - Support multimodal: accept `image_parts: list[ImagePart] | None` and append them as `inline_data` parts in the user turn.
+3. Promote the existing `ClaudeClient` Protocol (`engine/app/services/anthropic_client.py:38`) to a generic `LLMClient` Protocol so `extractor.py`, `grounder.py`, `consistency.py` accept either client without code changes at the call site.
+4. Add catalog entry to `engine/app/services/models.py` (per Phase 12 decision):
+   ```python
+   {"provider": "google", "id": "gemini-3-flash-preview",  "tier": "fast",     "input_price_per_mtok": ..., "output_price_per_mtok": ...},
+   {"provider": "google", "id": "gemini-3.1-pro-preview",  "tier": "flagship", "input_price_per_mtok": ..., "output_price_per_mtok": ...},
+   ```
+5. Update `lifespan` + `/health` to report Gemini availability (`GEMINI_API_KEY` present?) alongside Anthropic.
+6. Set the engine's safe default to `("google", "gemini-3-flash-preview")`. Update `Phase 12 §7` accordingly — the previous "Anthropic Haiku" default is superseded.
+
+### Phase G3: Multimodal contract ingestion (Day 2, ~3 hours — the demo's killer feature)
+
+1. Add `demo-app/backend/app/services/pdf_to_images.py` — render each PDF page to a PNG using `pypdfium2` (lighter than `pdf2image`, no system Poppler dep). Cap at e.g. 25 pages to stay inside Gemini's request budget.
+2. Refactor `demo-app/backend/app/services/analyzer.py`:
+   - Add a new `multimodal: bool` mode (default **on** for the Gemini track).
+   - When on, send `[system_instruction, page_image_1, page_image_2, ..., analyst_prompt]` to Gemini Pro instead of the text-extracted clause map.
+   - Ask Gemini to return clauses *and* their bounding-box hints (page number + approximate position phrase) so the UI can highlight the source in the original PDF later.
+3. Keep the existing text parsers (`pdf_parser.py`, `docx_parser.py`) as a fallback path for `multimodal=False` and for `.docx` (Gemini multimodal doesn't help there yet).
+4. Pick a "wow moment" demo contract: a scanned PDF with handwritten redlines or a stamp, that the text parser butchers but Gemini reads cleanly. Add it to the sample-contract quick-load buttons.
+5. Verify cost: a 10-page PDF at ~258 image tokens/page is roughly 2,580 input tokens — well within budget for the demo. Log the per-call cost in `metadata.cost_usd`.
+
+### Phase G4: Agent-driven workflow framing (Day 2, ~1 hour — wording, not code)
+
+The pipeline already *is* agent-driven, but the language needs to match the track's vocabulary so judges recognize it.
+
+1. Rename the orchestrator's user-facing labels: "extract → ground → check → aggregate" → "**Plan → Read → Verify → Reconcile**" (whatever names you settle on, keep them consistent across UI, video, README).
+2. Surface the agent steps in the `PipelineSteps` component as an animated trace, with each step labeled by which Gemini model is doing the work. This is what the judges literally see.
+3. Add a one-paragraph "How the agent works" section to the README and the slide deck — it should describe the pipeline in agent terminology (perception → reasoning → tool use → self-verification) rather than ML-engineer terminology.
+4. In the demo video, narrate the agent steps explicitly: "Gemini Pro reads the PDF pages… Gemini Flash extracts atomic claims… Gemini Pro double-checks each one against the source…"
+
+### Phase G5: Frontend selector + badges (Day 2, ~1 hour)
+
+1. Update `ModelSelector.tsx` (Phase 12 §10): Google group with `gemini-3.1-pro-preview` (flagship) and `gemini-3-flash-preview` (fast) shown first; default selection is Gemini Flash.
+2. Add provider logos next to model names (Google "G" and Anthropic mark) — visual proof in the demo screenshots that the system is provider-agnostic with Google as the default.
+3. `ReportSummary` / `ContractSummary` badges: "Google · Gemini 3.1 Pro · multimodal" when a multimodal run was used. Tie to `metadata.provider`, `metadata.model`, and a new `metadata.multimodal: bool`.
+
+### Phase G6: Submission deliverables specific to this track
+
+1. **Demo video script update.** Re-record (or splice) the contract demo to lead with the multimodal moment: drop a scanned PDF, show Gemini reading what `pdfplumber` would miss, then show TrustLayer verifying the result.
+2. **README banner**: "Powered by Gemini and Google AI Studio" with the AI Studio prompt-session links.
+3. **Architecture diagram**: add Google logo on the agent box; add a note that the engine is provider-agnostic but defaults to Gemini.
+4. **Cover image**: include the Gemini name/mark.
+5. **Submission form**: tick the Gemini / Google AI Studio track. Make sure the listed live URL has the Gemini default working without requiring the user to switch models.
+
+### Risks to watch on this track
+
+- **Rate limits on AI Studio free tier** are tighter than paid Anthropic — pre-cache demo runs, and have a backup recording in case of throttling during live judging.
+- **Structured output divergence**: Gemini's JSON-mode is reliable but its schema enforcement is stricter than Claude's "respond with JSON only" prompt — invalid schemas will hard-fail rather than silently degrade. Add schema-validation tests per stage.
+- **Multimodal token costs** scale with page count; cap pages and warn the user when a contract exceeds the cap.
+- **Don't ship Gemini as the *only* provider.** The provider-agnostic story is what makes TrustLayer interesting beyond the hackathon. Anthropic stays wired up; Gemini is just the default.
 
 ---
 
@@ -148,46 +252,135 @@
 4. Create cover image: split-screen showing the playground and contract reviewer
 5. Final submission: GitHub repo URL, live demo URL, video, slides, cover image
 
-### Phase 12: User-Selectable Model (post-demo, ~2 hours)
+### Phase 12: User-Selectable Provider + Model (post-demo)
 
-Goal: let the user choose a Claude model per request (Opus 4.6 / Sonnet 4.6 / Haiku 4.5) so they can trade off cost vs. quality. Server-side default still comes from `ANTHROPIC_MODEL`.
+> **Superseded in part by the Gemini track above.** Phase G2 already adds the Google adapter and promotes the `ClaudeClient` Protocol to a generic `LLMClient`. What remains here is OpenAI support, the `/models` endpoint, the cache-key fix, the budget guardrail, and the frontend selector — all still required, just no longer the *only* path to multi-provider.
+
+Goal: let the user choose **provider + model** per request (Google Gemini 2.5 Pro/Flash, Anthropic Opus/Sonnet/Haiku, OpenAI GPT-5/GPT-5-mini, etc.) so they can trade off cost vs. quality and so TrustLayer can demonstrably claim "provider-agnostic." Server-side default is `("google", "gemini-2.5-flash")` (per Phase G2) and is enforced regardless of what the client sends.
+
+> **Scope shift vs. earlier draft:** the original phase scoped this to picking among Claude models only. Going cross-provider is materially bigger — it requires a provider abstraction (or a router/gateway), per-provider prompt handling, two cost tables, two API keys, and a cache key that includes the provider. Decisions below must happen *before* coding.
+
+#### Decisions to make first
+
+1. **Build vs. route — pick one path before writing code.**
+   - **(a) Vercel AI Gateway (recommended for hackathon scale).** One URL, one key, model strings like `"anthropic/claude-opus-4-6"` or `"openai/gpt-5"`. Gateway handles retries, fallback, observability, and adds a `provider` field to each call for free. Trade-off: lose Anthropic prompt caching unless the gateway exposes it; new external dependency.
+   - **(b) Build your own provider abstraction.** New `LLMClient` Protocol with `AnthropicAdapter` and `OpenAIAdapter` behind it. Most control; you own every quirk. ~5–10× the work of (a).
+   - **(c) Router function with two SDKs.** Pragmatic middle. Keep `AnthropicClient` for Claude calls; add `OpenAIClient`; switch at one call site. Less elegant than (b), faster than (b).
+   - For the hackathon demo, **path (a) is the right answer** unless there's a specific reason Gateway can't expose what you need.
+
+2. **Prompt portability strategy.**
+   - Existing prompts in `engine/app/prompts/` (extractor / grounder / consistency) are Claude-tuned: XML-tag scaffolding (`<claim>`, `<thinking>`), terse system prompts, "respond with JSON only" instruction. GPT models do measurably better with explicit JSON schema (OpenAI structured output) than with Claude tag conventions.
+   - Pick one and document it: **(i)** per-provider prompt variants (more files to maintain, best quality), **(ii)** one generic prompt (under-performs both), or **(iii)** provider-specific JSON-mode wiring (Anthropic tool-use, OpenAI `response_format`).
+
+3. **Fast-model split — keep, drop, or per-provider?**
+   - Today, `extractor.py:141`, `grounder.py:134`, `consistency.py:151` all default to `settings.anthropic_fast_model` (Haiku) — only `ReportMetadata.model` is the "headline" model. Currently the metadata lies (says Opus, Haiku ran).
+   - Three options: **(i)** drop the fast-path entirely (single user-chosen model governs the whole pipeline → picking Opus is now ~15× more expensive), **(ii)** keep it but only when provider==Anthropic (document that "fast tier" is Claude-only), **(iii)** map fast-tier per provider (Anthropic Haiku, OpenAI gpt-5-mini). Decide explicitly; do not let Phase 12 default into option (i) silently.
+
+#### Implementation outline (after decisions above)
 
 1. **Engine — request schema**
-   - Add `model: Optional[str] = None` to `VerifyRequest`, `VerifyQuickRequest`, `VerifyClaimsRequest` in `engine/app/models/schemas.py`.
-   - Validate against a whitelist in one place (`engine/app/services/models.py`): `ALLOWED_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"}`. Reject unknown IDs with 400 + helpful error.
+   - Add `provider: Optional[Literal["anthropic", "openai"]]` and `model: Optional[str]` to `VerifyRequest`, `VerifyQuickRequest`, `VerifyClaimsRequest`, `VerifyBatchRequest` in `engine/app/models/schemas.py`. **Don't forget batch** — currently it has `mode` but no model field; if it stays absent, the dropdown will be inconsistent with batch behavior.
+   - Validate against a centralized catalog in `engine/app/services/models.py`: `ALLOWED_MODELS = [{"provider": "anthropic", "id": "claude-opus-4-6", ...}, {"provider": "openai", "id": "gpt-5", ...}, ...]`. Reject unknown `(provider, model)` pairs with 400 + helpful error.
+   - The catalog also owns prices so cost estimation and `/models` read from one place (avoids drift).
 
-2. **Engine — pipeline plumbing**
-   - Thread `model` through `VerifyPipeline.run(...)` down to the Anthropic call sites in `extractor.py`, `grounder.py`, `consistency.py`. Fall back to `settings.anthropic_model` when `None`.
-   - No separate "fast model" override needed — the single `model` arg governs the whole pipeline for that request.
-   - Include the resolved model in `ReportMetadata.model` (already the field, just ensure it reflects the request-scoped choice, not the default).
+2. **Engine — provider abstraction**
+   - Replace the existing `ClaudeClient` Protocol (`engine/app/services/anthropic_client.py:38-46`) with a provider-agnostic `LLMClient` returning normalized `(text, TokenUsage)`.
+   - Implement either (a) a single `GatewayAdapter` (Vercel AI Gateway) or (b) two adapters (`AnthropicAdapter`, `OpenAIAdapter`), per the decision above.
+   - Normalize token accounting: Anthropic uses `usage.input_tokens` / `usage.output_tokens`; OpenAI uses `usage.prompt_tokens` / `usage.completion_tokens` (plus `cached_tokens`, `reasoning_tokens` on newer models). The adapter must produce a uniform `TokenUsage` so `TokenLedger` (`anthropic_client.py:24-35`) keeps working unchanged.
 
-3. **Engine — catalog endpoint**
-   - Add `GET /models` returning `[{id, label, tier: "flagship"|"balanced"|"fast", input_price_per_mtok, output_price_per_mtok}]` so the frontend has a single source of truth and the dropdown stays in sync with backend whitelist.
+3. **Engine — pipeline plumbing**
+   - Thread `(provider, model)` through `VerifyPipeline.run(...)` to the call sites in `extractor.py`, `grounder.py`, `consistency.py`. Fall back to settings defaults when `None`.
+   - Apply the fast-model decision from above at this layer.
+   - Set `ReportMetadata.provider` (new field) and `ReportMetadata.model` to the **resolved** values that actually ran — fixing today's silent lie.
 
-4. **Demo backend — same treatment**
-   - Add optional `model` to `AnalyzeRequest`. Thread it into `AnalysisPipeline` → analyzer LLM call + every `/verify` call it makes to the engine. When absent, use the backend's `ANTHROPIC_MODEL`.
-   - Expose the same `/models` proxy so the frontend can call one URL regardless of which tab it's on.
+4. **Engine — cache key correctness (must-fix before shipping)**
+   - `make_cache_key` (used in `engine/app/main.py:624,658,703,833`) is currently keyed on text only. Once `(provider, model)` is request-scoped, two callers with different picks on the same input will see each other's results. Update every call site to `make_cache_key("full", provider, model, source, output)`.
+   - Without this fix, the model badge in the UI lies and the audit log lies.
 
-5. **Frontend — selector**
-   - New `components/ModelSelector.tsx`: small dropdown with tier labels and a "per 1M tokens" price hint. Fetch options from `/models` on mount; cache in `useMemo` + `localStorage`.
-   - Persist the user's pick in `localStorage.trustlayer.model`. Default to `claude-haiku-4-5-20251001` for cost safety.
+5. **Engine — catalog endpoint**
+   - Add `GET /models` returning `[{provider, id, label, tier: "flagship"|"balanced"|"fast", input_price_per_mtok, output_price_per_mtok, available: bool}]`. `available` is `false` when the corresponding API key is unset, so the frontend can grey out unusable options instead of 500ing on submit.
+   - Drives the frontend dropdown's provider-grouped UI.
 
-6. **Frontend — wire into hooks**
-   - `useVerify`: accept `model` param, include in `VerifyRequest` body.
-   - `useContract.analyzeNow`: accept `model`, pass through to `/analyze`.
-   - Surface the selector in both views' action rows (next to the "Verify" / "Review" button) so the user sees the cost implication at the point of action.
+6. **Engine — auth + lifespan**
+   - `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` (or `AI_GATEWAY_API_KEY` if path (a)) are independently optional. Lifespan warning + `/health` should report per-provider availability.
+   - `/models` filters out unavailable providers.
 
-7. **Frontend — show what ran**
-   - In `ReportSummary` metadata row and `ContractSummary`, display the model badge (e.g. "Haiku 4.5 · fast") tied to `metadata.model`, so the user can confirm the pipeline used their pick.
+7. **Engine — server-side default safety**
+   - Server default is `("google", "gemini-3-flash-preview")` (set in Phase G2). Any caller that omits `provider`/`model` (curl, partner integrations, demo backend if it forgets) gets this cheap default — not whatever `ANTHROPIC_MODEL` or `GEMINI_MODEL` env vars happen to point to.
 
-8. **Cost guardrail (nice-to-have)**
-   - If Opus is selected, show a small "~15× more expensive than Haiku" tooltip on the button.
-   - Optional: add `DAILY_OPUS_BUDGET_USD` env var; engine rejects Opus requests once exceeded and falls back to Sonnet with a warning in the response metadata.
+8. **Engine — cost guardrail (must-have, not nice-to-have, in multi-provider mode)**
+   - Once anyone can request Opus or GPT-5, a single legitimate caller within `RATE_LIMIT_PER_MINUTE=10` can burn ~15× the per-request cost of the default. Add `DAILY_FLAGSHIP_BUDGET_USD` (or per-provider variants); engine rejects flagship-tier requests once exceeded and falls back to balanced tier with a warning in `metadata.fallback_reason`.
+   - Pairs with Phase 13 item 3 (per-key budget caps + idempotency) — you can ship the global daily cap now and per-key later.
 
-9. **Tests**
-   - Engine: parametrized tests that `/verify` honors a request-scoped `model` and that an unknown model returns 400.
-   - Frontend: hook tests asserting the selected model is included in the request body and persisted across reloads.
+9. **Demo backend — same treatment**
+   - Add optional `(provider, model)` to `AnalyzeRequest`. Thread into `AnalysisPipeline` → analyzer LLM call + every `/verify` call it makes to the engine. When absent, use the backend's safe default.
+   - Expose `/models` as a proxy to the engine so the frontend calls one URL regardless of tab.
 
-10. **Docs**
-    - Update `engine/API.md`: document the `model` field and the `/models` endpoint.
-    - Update the main `README.md` and this file's Phase 6 notes once shipped.
+10. **Frontend — selector**
+    - New `components/ModelSelector.tsx`: dropdown grouped by provider (Anthropic, OpenAI), showing tier labels, "per 1M tokens" price hint, and disabled state for `available: false`.
+    - Fetch options from `/models` on mount; cache in `useMemo`.
+    - Persist user pick as `localStorage.trustlayer.modelPick = {provider, model}`.
+    - **Validate stored pick against `/models` response on load** — a stored ID like `"claude-haiku-4-5-20251001"` will outlive whitelist updates and 400 every Verify click after deprecation. Fall back to API-provided default if the stored pair is missing or `available: false`.
+
+11. **Frontend — wire into hooks**
+    - `useVerify`: accept `(provider, model)`, include in request body.
+    - `useContract.analyzeNow`: same.
+    - Surface the selector in both views' action rows so the cost implication is visible at point of action.
+
+12. **Frontend — show what ran**
+    - `ReportSummary` and `ContractSummary` display a provider+model badge (e.g. "Anthropic · Haiku 4.5 · fast") tied to `metadata.provider` + `metadata.model`. With the cache-key fix in place, this badge is now trustworthy.
+
+13. **Audit + observability**
+    - `build_verify_record(...)` (`engine/app/services/audit.py`) gains a `provider` field. `/audit/events` becomes filterable by provider.
+    - `/stats` should expose `metrics_by_provider` so latency p95 stops being bimodal-and-misleading once two providers mix.
+
+14. **Tests**
+    - Engine: parametrized tests that `/verify` honors `(provider, model)` per request, that unknown pairs return 400, and that **fakes assert on the resolved model arg reaching `create_message`** — otherwise wiring bugs pass silently.
+    - Cache: assert two requests with same text but different `(provider, model)` produce distinct cache entries.
+    - Default safety: assert a request omitting `(provider, model)` resolves to the safe default, not `settings.anthropic_model`.
+    - Budget guardrail: assert flagship requests fall back to balanced once `DAILY_FLAGSHIP_BUDGET_USD` is exceeded.
+    - Frontend: hook tests asserting the selected pair is included in the request body, persisted across reloads, and that a stale localStorage pair falls back gracefully.
+
+15. **Docs**
+    - Update `engine/API.md`: document `provider` + `model` fields, `/models` shape with `available`, the budget-guardrail behavior.
+    - Update `README.md`: TrustLayer is provider-agnostic; how to add a new provider.
+    - Update Phase 6 notes here once shipped.
+
+### Phase 13: Production Readiness — Hardening Priorities (post-demo)
+
+Ranked by impact on the codebase as it stands. Items 1–2 close real durability bugs that the current governance/scaling story already depends on; 3–5 build on that foundation.
+
+**Storage philosophy: Postgres-first.** A single managed Postgres (Neon / Supabase / Render free tier) can host audit, trace, cache, and rate-limit state with one TTL sweeper job. Skip Redis until measurements show Postgres write QPS or lock contention is hurting p95 — likely never at current scale. Reach for R2/S3 only as cold-storage offload once audit volume outgrows the Postgres free tier.
+
+1. **Durable audit + trace storage (Postgres-first)**
+   - Today, `_audit_log` writes to a local JSONL file (`engine/app/services/audit.py`) and `_trace_store` lives in process memory (`engine/app/main.py`). On Render's ephemeral disk or any multi-instance deploy, audit lines and traces are lost or fragmented — which directly breaks the governance/explainability story TrustLayer is selling.
+   - Add one Postgres instance (Neon free tier is the lowest-friction) with two tables:
+     - `audit_events (id, request_id, endpoint, model, latency_ms, outcome_counts jsonb, tokens_in, tokens_out, cost_usd, created_at)` — append-only, replaces the JSONL writer.
+     - `verify_traces (request_id pk, endpoint, report jsonb, evidence jsonb, expires_at)` — keyed lookup with TTL via an `expires_at` column.
+   - Add a single periodic sweeper (FastAPI startup task or `pg_cron`) that runs `DELETE FROM verify_traces WHERE expires_at < now()` and optionally archives `audit_events` older than N days to R2.
+   - Optional cold storage: when audit rows exceed the free-tier budget, batch-flush old rows to Cloudflare R2 (no egress fees) as date-partitioned JSONL and `DELETE` them from Postgres. R2 is fine for audit because it's write-mostly + append-only. **Do not** put trace there — keyed lookup with 15-min TTL is the wrong access pattern for object storage.
+   - Acceptance: kill the engine pod between a `/verify` call and a `/verify/trace/{request_id}` lookup, and the trace still resolves.
+
+2. **Postgres-backed limiter / cache (then horizontal scale is safe)**
+   - Replace in-process `SlidingWindowRateLimiter` and `TTLCache` with Postgres-backed equivalents so multiple replicas share state. Two more tables on the same instance:
+     - `response_cache (key pk, body jsonb, expires_at)` — same TTL sweeper as the trace table.
+     - `rate_events (key, ts)` — sliding window via `SELECT count(*) FROM rate_events WHERE key = $1 AND ts > now() - interval '1 min'`. Index on `(key, ts)`.
+   - Without this, two replicas effectively double the per-user rate limit and split the cache hit rate in half.
+   - If load testing later shows the rate-limit table contending on writes, swap *just that table* for Upstash Redis free tier (10k commands/day, native TTL) — Postgres still owns audit/trace/cache. Don't speculatively pre-introduce Redis.
+   - Acceptance: scale to 2+ engine instances behind a load balancer and observe consistent rate-limit headers + cache hit rate vs. single-instance.
+
+3. **Per-key budget caps + idempotency keys**
+   - Today, `RATE_LIMIT_PER_MINUTE` only bounds *request count*. A misbehaving caller can drive arbitrary Anthropic spend without ever tripping it.
+   - Add per-key (or per-tenant) token and USD ceilings on top of the request limit; reject with `429` + budget headers when exceeded.
+   - Add support for a client-supplied `Idempotency-Key` header on `/verify*` so safe retries don't double-bill expensive LLM calls. Cache the response keyed by `(api_key_id, idempotency_key)`.
+   - Pairs naturally with Anthropic prompt caching for additional cost reduction.
+
+4. **Tenant identifiers in audit + trace**
+   - Add `tenant_id` / `api_key_id` fields to `build_verify_record(...)` output and the `VerifyTrace` model.
+   - Enforce tenant-level filtering server-side on `/audit/events` and `/verify/trace/{request_id}` — a tenant must never read another tenant's records, even with a valid token.
+   - Acceptance: integration test confirming a tenant-A token gets `404` (not `403`-leak) for tenant-B request_ids.
+
+5. **Auth scoping — only if a partner integration forces it**
+   - Current shared-secret bearer auth (`engine/app/main.py:150-158`) is fine until there's a real reason to give partners read-only access to a subset of endpoints.
+   - Min-viable upgrade when needed: two tokens — `API_AUTH_TOKEN` for `/verify*` and a separate `ADMIN_TOKEN` for `/audit*` and `/stats`.
+   - Defer JWT scopes (`verify:write` / `audit:read` / `stats:read`) until there's a concrete partner-integration driver; the JWT machinery is over-engineered for current maturity.

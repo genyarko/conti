@@ -18,6 +18,16 @@ _MODEL_PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (1.0, 5.0),
     "claude-haiku-4-5": (1.0, 5.0),
     "claude-haiku-4": (1.0, 5.0),
+    # Gemini 3.x preview family. Confirm against Google pricing before billing.
+    # Conservative placeholders modeled on the 2.x → 3.x preview-tier delta.
+    "gemini-3.1-pro-preview-customtools": (2.5, 15.0),
+    "gemini-3.1-pro-preview": (2.5, 15.0),
+    "gemini-3.1-pro": (2.5, 15.0),
+    "gemini-3-flash-preview": (0.30, 1.20),
+    "gemini-3-flash": (0.30, 1.20),
+    # Gemini 2.5 family (the IDs Vertex AI actually serves).
+    "gemini-2.5-pro": (1.25, 10.0),
+    "gemini-2.5-flash": (0.30, 2.50),
 }
 
 _warned_models: set[str] = set()

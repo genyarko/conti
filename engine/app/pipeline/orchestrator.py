@@ -18,9 +18,9 @@ from engine.app.pipeline.aggregator import ReportAggregator
 from engine.app.pipeline.consistency import ConsistencyChecker, ConsistencyResult
 from engine.app.pipeline.extractor import ClaimExtractor
 from engine.app.pipeline.grounder import ClaimGrounder, GroundingResult
+from engine.app.services import llm_factory
 from engine.app.services.anthropic_client import TokenLedger
 from engine.app.services.pricing import estimate_cost_usd
-from engine.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -35,25 +35,72 @@ class VerifyPipeline:
     # raw per-claim evidence alongside the aggregated report.
     last_evidence: list[TraceClaimEvidence] = field(default_factory=list)
 
-    def _components(self, ledger: Optional[TokenLedger] = None) -> tuple[
+    def _components(
+        self,
+        ledger: Optional[TokenLedger] = None,
+        *,
+        resolved: Optional[llm_factory.Resolved] = None,
+    ) -> tuple[
         ClaimExtractor, ClaimGrounder, ConsistencyChecker, ReportAggregator
     ]:
+        # Caller-supplied components win unconditionally — that's how tests
+        # inject stub clients without triggering real API calls. When a slot
+        # is empty AND a resolver is given, build a fresh component bound to
+        # the resolved provider's client, with the per-stage model split:
+        # fast tier for extractor + grounder, flagship for consistency.
+        client = (
+            llm_factory.get_client(resolved.provider)
+            if resolved is not None and (
+                self.extractor is None
+                or self.grounder is None
+                or self.consistency is None
+            )
+            else None
+        )
+
         extractor = self.extractor
         if extractor is None:
-            extractor = ClaimExtractor(ledger=ledger)
-        elif ledger is not None and hasattr(extractor, "_ledger") and extractor._ledger is None:
+            if resolved is not None:
+                extractor = ClaimExtractor(
+                    client=client, model=resolved.fast_model, ledger=ledger
+                )
+            else:
+                extractor = ClaimExtractor(ledger=ledger)
+        elif (
+            ledger is not None
+            and hasattr(extractor, "_ledger")
+            and extractor._ledger is None
+        ):
             extractor._ledger = ledger
 
         grounder = self.grounder
         if grounder is None:
-            grounder = ClaimGrounder(ledger=ledger)
-        elif ledger is not None and hasattr(grounder, "_ledger") and grounder._ledger is None:
+            if resolved is not None:
+                grounder = ClaimGrounder(
+                    client=client, model=resolved.fast_model, ledger=ledger
+                )
+            else:
+                grounder = ClaimGrounder(ledger=ledger)
+        elif (
+            ledger is not None
+            and hasattr(grounder, "_ledger")
+            and grounder._ledger is None
+        ):
             grounder._ledger = ledger
 
         consistency = self.consistency
         if consistency is None:
-            consistency = ConsistencyChecker(ledger=ledger)
-        elif ledger is not None and hasattr(consistency, "_ledger") and consistency._ledger is None:
+            if resolved is not None:
+                consistency = ConsistencyChecker(
+                    client=client, model=resolved.model, ledger=ledger
+                )
+            else:
+                consistency = ConsistencyChecker(ledger=ledger)
+        elif (
+            ledger is not None
+            and hasattr(consistency, "_ledger")
+            and consistency._ledger is None
+        ):
             consistency._ledger = ledger
 
         return (
@@ -62,6 +109,17 @@ class VerifyPipeline:
             consistency,
             self.aggregator or ReportAggregator(),
         )
+
+    def _resolve(
+        self, provider: Optional[str], model: Optional[str]
+    ) -> llm_factory.Resolved:
+        return llm_factory.resolve(provider=provider, model=model)
+
+    def _new_metadata(self, resolved: llm_factory.Resolved) -> ReportMetadata:
+        # Stamp the metadata with the *resolved* provider+model that actually
+        # ran — fixing the prior bug where metadata.model said "Opus" while
+        # Haiku did the work.
+        return ReportMetadata(provider=resolved.provider, model=resolved.model)
 
     def _apply_usage(
         self, metadata: ReportMetadata, ledger: TokenLedger
@@ -80,8 +138,11 @@ class VerifyPipeline:
 
     async def run(self, request: VerifyRequest) -> IntegrityReport:
         ledger = TokenLedger()
-        extractor, grounder, consistency, aggregator = self._components(ledger)
-        metadata = ReportMetadata(model=settings.anthropic_model)
+        resolved = self._resolve(request.provider, request.model)
+        extractor, grounder, consistency, aggregator = self._components(
+            ledger, resolved=resolved
+        )
+        metadata = self._new_metadata(resolved)
         self.last_evidence = []
 
         t0 = time.perf_counter()
@@ -136,8 +197,13 @@ class VerifyPipeline:
         callers just want a cheap "is this supported by the source?" check.
         """
         ledger = TokenLedger()
-        extractor, grounder, _consistency, aggregator = self._components(ledger)
-        metadata = ReportMetadata(model=settings.anthropic_model)
+        resolved = self._resolve(request.provider, request.model)
+        extractor, grounder, _consistency, aggregator = self._components(
+            ledger, resolved=resolved
+        )
+        metadata = self._new_metadata(resolved)
+        # Quick mode runs only on the fast tier — record that, not the flagship.
+        metadata.model = resolved.fast_model
         self.last_evidence = []
 
         t0 = time.perf_counter()
@@ -170,12 +236,20 @@ class VerifyPipeline:
         return report
 
     async def run_with_claims(
-        self, source_context: str, claims: list[Claim]
+        self,
+        source_context: str,
+        claims: list[Claim],
+        *,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> IntegrityReport:
         """Skip extraction and verify caller-supplied claims directly."""
         ledger = TokenLedger()
-        _extractor, grounder, consistency, aggregator = self._components(ledger)
-        metadata = ReportMetadata(model=settings.anthropic_model)
+        resolved = self._resolve(provider, model)
+        _extractor, grounder, consistency, aggregator = self._components(
+            ledger, resolved=resolved
+        )
+        metadata = self._new_metadata(resolved)
         metadata.extractor_ms = 0
         self.last_evidence = []
 

@@ -1,5 +1,56 @@
 from __future__ import annotations
 
+from typing import Any
+
+# JSON schema the extractor's response must conform to. The Gemini provider
+# enforces this server-side via `response_schema`; Anthropic models follow it
+# from the prose schema embedded in the system prompt below. Keeping both
+# representations in sync — change one, change the other.
+EXTRACTOR_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Sequential id (c1, c2, c3, …) in reading order.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "The atomic claim, rewritten as a self-contained "
+                            "declarative sentence with pronouns resolved."
+                        ),
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "factual",
+                            "interpretive",
+                            "recommendation",
+                            "quantitative",
+                        ],
+                    },
+                    "source_quote_if_any": {
+                        "type": "string",
+                        "description": (
+                            "Shortest verbatim contiguous slice of the input "
+                            "this claim was derived from, or empty string if "
+                            "synthesized from non-contiguous passages."
+                        ),
+                    },
+                },
+                "required": ["id", "text", "type"],
+            },
+        },
+    },
+    "required": ["claims"],
+}
+
+
 EXTRACTOR_SYSTEM_PROMPT = """You are a precise claim-extraction engine for an LLM-output verification pipeline.
 
 Your job: decompose an LLM-generated text into a list of ATOMIC, VERIFIABLE claims so each can be independently fact-checked against a source.

@@ -11,15 +11,19 @@ from rapidfuzz import fuzz
 
 from engine.app.models.schemas import Claim, GroundingLevel
 from engine.app.prompts.grounder_prompt import (
+    GROUNDER_RESPONSE_SCHEMA,
     GROUNDER_SYSTEM_PROMPT,
     build_grounder_user_prompt,
 )
 from engine.app.services.anthropic_client import (
     AnthropicClient,
-    ClaudeClient as _ClaudeClient,
+    LLMClient as _LLMClient,
     TokenLedger,
 )
+from engine.app.services import llm_factory
 from engine.config import settings
+
+_ClaudeClient = _LLMClient
 
 log = logging.getLogger(__name__)
 
@@ -124,15 +128,20 @@ def _semantic_score(support: str, confidence: Any) -> int:
 class ClaimGrounder:
     def __init__(
         self,
-        client: Optional[_ClaudeClient] = None,
+        client: Optional[_LLMClient] = None,
         *,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         ledger: Optional[TokenLedger] = None,
     ) -> None:
-        self._client = client or AnthropicClient(api_key=settings.anthropic_api_key)
-        self._model = model or settings.anthropic_fast_model
-        self._max_tokens = max_tokens or settings.anthropic_max_tokens
+        if client is None:
+            resolved = llm_factory.resolve()
+            self._client = llm_factory.get_client(resolved.provider)
+            self._model = model or resolved.fast_model
+        else:
+            self._client = client
+            self._model = model or settings.anthropic_fast_model
+        self._max_tokens = max_tokens or llm_factory.max_tokens_for(self._model)
         self._ledger = ledger
 
     async def ground(self, claim: Claim, source_context: str) -> GroundingResult:
@@ -161,12 +170,13 @@ class ClaimGrounder:
                 reasoning="Direct textual match against source.",
             )
 
-        # Semantic fallback via Claude.
+        # Semantic fallback via the configured LLM provider.
         raw = await self._client.create_message(
             system=GROUNDER_SYSTEM_PROMPT,
             user=build_grounder_user_prompt(claim.text, source_context),
             model=self._model,
             max_tokens=self._max_tokens,
+            response_schema=GROUNDER_RESPONSE_SCHEMA,
         )
         if self._ledger is not None:
             self._ledger.record_from(self._client)

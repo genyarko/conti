@@ -6,10 +6,10 @@ interface Props {
 
 const STAGE_HINT: Record<PipelineStage, string> = {
   idle: "",
-  extracting: "Decomposing the LLM output into atomic, verifiable claims…",
-  grounding: "Matching each claim to passages in your source context…",
-  checking: "Evaluating logical consistency with a skeptical reviewer…",
-  aggregating: "Scoring claims and assembling the integrity report…",
+  extracting: "Planning the audit — listing atomic, verifiable claims…",
+  grounding: "Reading the source — matching each claim to its passage…",
+  checking: "Verifying the logic — auditing each claim against the source…",
+  aggregating: "Reconciling the verdicts into the integrity report…",
   done: "",
   error: "",
 };

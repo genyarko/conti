@@ -57,6 +57,20 @@ class VerifyRequest(BaseModel):
         max_length=128,
         description="Optional JSON schema describing the expected structure of llm_output.",
     )
+    provider: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional provider override (e.g. 'google', 'anthropic'). "
+            "Falls back to the engine's configured default."
+        ),
+    )
+    model: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional model id override (e.g. 'gemini-3.1-pro-preview'). "
+            "Falls back to the provider's flagship model."
+        ),
+    )
 
 
 class Claim(BaseModel):
@@ -92,6 +106,8 @@ class VerifyClaimsRequest(BaseModel):
 
     source_context: str = Field(..., min_length=1)
     claims: list[ClaimInput] = Field(..., min_length=1)
+    provider: Optional[str] = Field(default=None)
+    model: Optional[str] = Field(default=None)
 
 
 class VerifyQuickRequest(VerifyRequest):
@@ -111,6 +127,7 @@ class ClaimVerdict(BaseModel):
 
 
 class ReportMetadata(BaseModel):
+    provider: str = "anthropic"
     model: str
     request_id: str = Field(default_factory=lambda: _new_id("req"))
     created_at: datetime = Field(
@@ -153,6 +170,8 @@ class VerifyBatchRequest(BaseModel):
         pattern="^(full|quick)$",
         description="Verification mode per item: 'full' runs the consistency stage; 'quick' is grounding-only.",
     )
+    provider: Optional[str] = Field(default=None)
+    model: Optional[str] = Field(default=None)
 
 
 class BatchItemError(BaseModel):

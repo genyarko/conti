@@ -78,6 +78,9 @@ export async function analyze(
     text?: string;
     filename?: string;
     skip_verification?: boolean;
+    provider?: string;
+    model?: string;
+    multimodal?: boolean;
   },
   signal?: AbortSignal,
 ): Promise<AnalyzeResponse> {

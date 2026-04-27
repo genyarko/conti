@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { useVerify } from "../hooks/useVerify";
+import { useModelCatalog } from "../hooks/useModelCatalog";
 import { SAMPLES } from "../lib/samples";
 import type { Claim, VerifyMode } from "../types/trustlayer";
 import ClaimBucket from "../components/ClaimBucket";
 import HallucinationLog from "../components/HallucinationLog";
 import LoadingSkeleton from "../components/LoadingSkeleton";
+import ModelSelector from "../components/ModelSelector";
 import PipelineSteps from "../components/PipelineSteps";
 import ReportSummary from "../components/ReportSummary";
 
@@ -13,6 +15,7 @@ export default function PlaygroundView() {
   const [output, setOutput] = useState(SAMPLES[0].output);
   const [mode, setMode] = useState<VerifyMode>("full");
   const { report, error, isLoading, stage, elapsedMs, run, reset } = useVerify();
+  const { catalog, pick, setPick } = useModelCatalog();
 
   const canSubmit = source.trim().length > 0 && output.trim().length > 0 && !isLoading;
 
@@ -23,7 +26,15 @@ export default function PlaygroundView() {
   }, [report]);
 
   const onVerify = () => {
-    run({ source_context: source.trim(), llm_output: output.trim() }, mode);
+    run(
+      {
+        source_context: source.trim(),
+        llm_output: output.trim(),
+        provider: pick?.provider,
+        model: pick?.model,
+      },
+      mode,
+    );
   };
 
   const loadSample = (idx: number) => {
@@ -98,6 +109,14 @@ export default function PlaygroundView() {
           )}
         </button>
         <ModeToggle mode={mode} onChange={setMode} disabled={isLoading} />
+        {catalog && (
+          <ModelSelector
+            models={catalog.models}
+            pick={pick}
+            onChange={setPick}
+            disabled={isLoading}
+          />
+        )}
         {(report || error) && !isLoading && (
           <button type="button" className="btn-ghost" onClick={reset}>
             Clear result

@@ -8,15 +8,20 @@ from typing import Any, Optional
 
 from engine.app.models.schemas import Claim, ClaimCategory
 from engine.app.prompts.extractor_prompt import (
+    EXTRACTOR_RESPONSE_SCHEMA,
     EXTRACTOR_SYSTEM_PROMPT,
     build_user_prompt,
 )
 from engine.app.services.anthropic_client import (
     AnthropicClient,
-    ClaudeClient as _ClaudeClient,
+    LLMClient as _LLMClient,
     TokenLedger,
 )
+from engine.app.services import llm_factory
 from engine.config import settings
+
+# Back-compat alias for callers/tests still importing ClaudeClient from here.
+_ClaudeClient = _LLMClient
 
 log = logging.getLogger(__name__)
 
@@ -131,15 +136,23 @@ class ExtractionResult:
 class ClaimExtractor:
     def __init__(
         self,
-        client: Optional[_ClaudeClient] = None,
+        client: Optional[_LLMClient] = None,
         *,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         ledger: Optional[TokenLedger] = None,
     ) -> None:
-        self._client = client or AnthropicClient(api_key=settings.anthropic_api_key)
-        self._model = model or settings.anthropic_fast_model
-        self._max_tokens = max_tokens or settings.anthropic_max_tokens
+        if client is None:
+            resolved = llm_factory.resolve()
+            self._client = llm_factory.get_client(resolved.provider)
+            self._model = model or resolved.fast_model
+        else:
+            self._client = client
+            # Default to the Anthropic fast model for back-compat when a caller
+            # passes a custom client without specifying a model. The
+            # orchestrator overrides this on every real run.
+            self._model = model or settings.anthropic_fast_model
+        self._max_tokens = max_tokens or llm_factory.max_tokens_for(self._model)
         self._ledger = ledger
 
     async def extract(self, llm_output: str) -> ExtractionResult:
@@ -166,6 +179,7 @@ class ClaimExtractor:
                 user=user_prompt,
                 model=self._model,
                 max_tokens=self._max_tokens,
+                response_schema=EXTRACTOR_RESPONSE_SCHEMA,
             )
             if self._ledger is not None:
                 self._ledger.record_from(self._client)

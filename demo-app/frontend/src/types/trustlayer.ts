@@ -39,6 +39,7 @@ export interface ClaimVerdict {
 }
 
 export interface ReportMetadata {
+  provider?: string;
   model: string;
   request_id: string;
   created_at: string;
@@ -64,6 +65,8 @@ export interface IntegrityReport {
 export interface VerifyRequest {
   source_context: string;
   llm_output: string;
+  provider?: string;
+  model?: string;
 }
 
 export type VerifyMode = "full" | "quick";

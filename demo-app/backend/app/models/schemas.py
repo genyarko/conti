@@ -99,6 +99,25 @@ class AnalyzeRequest(BaseModel):
         default=False,
         description="If true, return analyzer findings without calling TrustLayer.",
     )
+    provider: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Provider override (e.g. 'google', 'anthropic').",
+    )
+    model: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Model id override (e.g. 'gemini-3.1-pro-preview').",
+    )
+    multimodal: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Force multimodal PDF ingestion on/off. When omitted, defaults "
+            "to the server's MULTIMODAL_ENABLED setting and is only "
+            "actually applied when the contract is a PDF and the provider "
+            "supports image inputs."
+        ),
+    )
 
 
 class ContractSummary(BaseModel):

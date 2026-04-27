@@ -29,9 +29,16 @@ class FakeClient:
         user: str,
         model: str,
         max_tokens: int,
+        response_schema: dict | None = None,
     ) -> str:
         self.calls.append(
-            {"system": system, "user": user, "model": model, "max_tokens": max_tokens}
+            {
+                "system": system,
+                "user": user,
+                "model": model,
+                "max_tokens": max_tokens,
+                "response_schema": response_schema,
+            }
         )
         if self._idx >= len(self.responses):
             raise AssertionError("FakeClient ran out of canned responses")

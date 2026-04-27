@@ -10,10 +10,10 @@ const STEPS: {
   label: string;
   sub: string;
 }[] = [
-  { id: "extracting", label: "Extract", sub: "Decompose into atomic claims" },
-  { id: "grounding", label: "Ground", sub: "Match each claim to source" },
-  { id: "checking", label: "Check", sub: "Evaluate logical consistency" },
-  { id: "aggregating", label: "Aggregate", sub: "Score and categorize" },
+  { id: "extracting", label: "Plan", sub: "List atomic claims to verify" },
+  { id: "grounding", label: "Read", sub: "Locate each claim in the source" },
+  { id: "checking", label: "Verify", sub: "Audit logic and contradictions" },
+  { id: "aggregating", label: "Reconcile", sub: "Score and assemble the report" },
 ];
 
 const ORDER: PipelineStage[] = [
