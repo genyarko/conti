@@ -199,6 +199,61 @@ async def test_score_is_100_only_when_truly_clean():
     assert response.summary.overall_risk == RiskLevel.OK
 
 
+# Regression: Gemini sometimes anchors a "Missing X" item to the closest
+# related section_id and emits it via `findings`. The verifier then tries to
+# ground an absence claim against clause text and suppresses it as ungrounded.
+# The analyzer must reroute such findings into `missing_clauses` before
+# verification runs.
+ANALYZER_RESPONSE_MIS_ROUTED_MISSING = {
+    "contract_type": "Service Agreement",
+    "parties": ["Provider", "Customer"],
+    "plain_language_summary": "Test.",
+    "overall_risk": "critical",
+    "findings": [
+        {
+            "section_id": "2",
+            "title": "Missing Limitation of Liability",
+            "risk": "critical",
+            "category": "liability",
+            "summary": "The contract does not contain a Limitation of Liability clause.",
+            "recommendation": "Add a mutual cap.",
+        },
+        {
+            "section_id": "1",
+            "title": "Unilateral fee increase",
+            "risk": "critical",
+            "category": "payment",
+            "summary": "Provider can raise fees at any time without notice.",
+            "recommendation": "Require advance notice.",
+        },
+    ],
+    "missing_clauses": [],
+}
+
+
+@pytest.mark.asyncio
+async def test_mis_routed_missing_finding_is_rerouted():
+    contract = ingest_text(SAMPLE_CONTRACT, filename="sample.txt")
+    analyzer = ContractAnalyzer(
+        client=FakeClaudeClient(response=ANALYZER_RESPONSE_MIS_ROUTED_MISSING),
+        model="test-model",
+        max_tokens=1024,
+    )
+    pipeline = AnalysisPipeline(analyzer=analyzer, verifier=FakeVerifier())
+
+    response = await pipeline.run(contract)
+
+    finding_titles = [vf.finding.title for vf in response.findings]
+    assert "Missing Limitation of Liability" not in finding_titles
+    assert "Unilateral fee increase" in finding_titles
+
+    missing_titles = [f.title for f in response.missing_clauses]
+    assert "Missing Limitation of Liability" in missing_titles
+    rerouted = next(f for f in response.missing_clauses if f.title == "Missing Limitation of Liability")
+    assert rerouted.section_id == "missing"
+    assert rerouted.clause_quote is None
+
+
 @pytest.mark.asyncio
 async def test_findings_with_optional_clause_quote():
     """clause_quote is no longer required — verify finding survives without it."""

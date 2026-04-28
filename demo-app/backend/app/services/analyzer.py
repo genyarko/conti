@@ -112,10 +112,24 @@ class ContractAnalyzer:
         raw_findings = [
             item for item in parsed.get("findings", []) if isinstance(item, dict)
         ]
+        raw_missing = [
+            item for item in parsed.get("missing_clauses", []) if isinstance(item, dict)
+        ]
+
+        # Catch "Missing X" findings the analyst routed into `findings` — clause-grounding can't ground an absence claim.
+        rerouted_to_missing = 0
+        kept_findings: list[dict[str, Any]] = []
+        for item in raw_findings:
+            if _looks_like_missing_clause(item):
+                raw_missing.append(_demote_to_missing(item))
+                rerouted_to_missing += 1
+            else:
+                kept_findings.append(item)
+
         dropped_unknown_section = 0
         dropped_invented_quote = 0
         findings: list[Finding] = []
-        for item in raw_findings:
+        for item in kept_findings:
             converted, drop_reason = _to_finding_with_reason(item, clause_index)
             if converted is not None:
                 findings.append(converted)
@@ -126,11 +140,7 @@ class ContractAnalyzer:
                 # the rest of the data, just lost a fabricated quote.
                 dropped_invented_quote += 1
 
-        missing = [
-            _to_missing_finding(item)
-            for item in parsed.get("missing_clauses", [])
-            if isinstance(item, dict)
-        ]
+        missing = [_to_missing_finding(item) for item in raw_missing]
         missing = [f for f in missing if f is not None]
 
         if dropped_unknown_section:
@@ -156,6 +166,7 @@ class ContractAnalyzer:
                 "raw_findings_count": len(raw_findings),
                 "dropped_unknown_section": dropped_unknown_section,
                 "dropped_invented_quote": dropped_invented_quote,
+                "rerouted_to_missing": rerouted_to_missing,
             },
         )
 
@@ -235,3 +246,45 @@ def _to_missing_finding(raw: dict[str, Any]) -> Optional[Finding]:
         recommendation=str(raw.get("recommendation") or "").strip(),
         clause_quote=None,
     )
+
+
+# Trailing space matters: matches "Missing X" but not "Missing-quote finding".
+_LIKELY_MISSING_TITLE_PREFIXES = (
+    "missing ",
+    "lack of ",
+    "absence of ",
+    "absent ",
+    "no ",
+)
+_LIKELY_MISSING_SUMMARY_PHRASES = (
+    "the contract does not contain",
+    "the contract contains no",
+    "the contract lacks",
+    "the contract is missing",
+    "the document does not contain",
+    "the document lacks",
+    "there is no clause",
+    "there is no provision",
+    "no provision for",
+    "does not include a ",
+)
+
+
+def _looks_like_missing_clause(raw: dict[str, Any]) -> bool:
+    title = str(raw.get("title") or "").strip().lower()
+    summary = str(raw.get("summary") or "").strip().lower()
+    if any(title.startswith(p) for p in _LIKELY_MISSING_TITLE_PREFIXES):
+        return True
+    return any(phrase in summary for phrase in _LIKELY_MISSING_SUMMARY_PHRASES)
+
+
+def _demote_to_missing(raw: dict[str, Any]) -> dict[str, Any]:
+    risk = str(raw.get("risk") or "").lower().strip()
+    if risk not in {"critical", "warning"}:
+        risk = "warning"
+    return {
+        "title": raw.get("title") or "",
+        "risk": risk,
+        "summary": raw.get("summary") or "",
+        "recommendation": raw.get("recommendation") or "",
+    }

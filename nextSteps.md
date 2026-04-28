@@ -3,7 +3,11 @@
 > **Core product:** A general-purpose API that verifies any LLM output for hallucinations, ungrounded claims, and logical inconsistencies.  
 > **Showcase demo:** An AI Contract Reviewer powered by TrustLayer, proving the engine works on a high-stakes real-world use case.
 
-Re-tighten the org policies after deploy succeeds.
+*** Re-tighten the org policies after deploy succeeds.
+
+**  Verifier-side skip for absence claims. A finding with title.startswith("Missing") or category == missing_clause shouldn't go through the clause-grounding pass at all —
+  it should bypass to a "does the document contain anything about X?" check. That fixes the second bug too (the Set-off case still has a real grounded half, but absence
+  claims as a class shouldn't be measured by clause-level grounding).
 
 ---
 
