@@ -32,7 +32,11 @@ class Settings(BaseSettings):
     gemini_fast_model: str = Field(
         default="gemini-3-flash-preview", alias="GEMINI_FAST_MODEL"
     )
-    gemini_max_tokens: int = Field(default=8192, alias="GEMINI_MAX_TOKENS")
+    # Gemini 3 thinking models (flash/pro previews) burn a large share of
+    # output tokens on internal reasoning before producing the answer, so the
+    # earlier 8192 default truncated /verify responses. 32768 leaves headroom
+    # for thinking + answer on both flash and pro without env overrides.
+    gemini_max_tokens: int = Field(default=32768, alias="GEMINI_MAX_TOKENS")
     # Vertex AI / "Gemini Enterprise" path: bills through Cloud (uses trial
     # credit) instead of AI Studio's prepay pool. Auth comes from
     # Application Default Credentials (gcloud auth application-default login),
