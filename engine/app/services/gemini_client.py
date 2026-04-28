@@ -135,11 +135,11 @@ class GeminiClient:
                 threshold="BLOCK_NONE",
             )
             for cat in [
-                "HATE_SPEECH",
-                "HARASSMENT",
-                "SEXUALLY_EXPLICIT",
-                "DANGEROUS_CONTENT",
-                "CIVIC_INTEGRITY",
+                "HARM_CATEGORY_HATE_SPEECH",
+                "HARM_CATEGORY_HARASSMENT",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "HARM_CATEGORY_CIVIC_INTEGRITY",
             ]
         ]
 
@@ -154,7 +154,7 @@ class GeminiClient:
         )
 
         # Gemini Pro has tight quotas (2 RPM on free tier); add robust retries.
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 resp = await self._client.aio.models.generate_content(
@@ -164,10 +164,16 @@ class GeminiClient:
                 )
                 break
             except Exception as exc:
-                exc_str = str(exc)
-                is_retryable = "429" in exc_str or "503" in exc_str or "500" in exc_str
+                exc_str = str(exc).lower()
+                # 429 (quota), 503 (overloaded), 500 (internal error) are retryable.
+                # google-genai SDK also uses "resource_exhausted" and "deadline_exceeded".
+                is_retryable = any(
+                    code in exc_str 
+                    for code in ["429", "503", "500", "resource_exhausted", "deadline_exceeded", "quota", "overloaded"]
+                )
                 if is_retryable and attempt < max_retries - 1:
-                    wait = (attempt + 1) * 2
+                    # Longer backoff for 429s as 2 RPM means we might need ~30s.
+                    wait = (attempt + 1) * 5 
                     log.warning("Gemini %s failed (attempt %d): %s. Retrying in %ds...", model, attempt + 1, exc_str, wait)
                     await asyncio.sleep(wait)
                     continue
@@ -212,11 +218,11 @@ class GeminiClient:
                 threshold="BLOCK_NONE",
             )
             for cat in [
-                "HATE_SPEECH",
-                "HARASSMENT",
-                "SEXUALLY_EXPLICIT",
-                "DANGEROUS_CONTENT",
-                "CIVIC_INTEGRITY",
+                "HARM_CATEGORY_HATE_SPEECH",
+                "HARM_CATEGORY_HARASSMENT",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "HARM_CATEGORY_CIVIC_INTEGRITY",
             ]
         ]
 
@@ -233,7 +239,7 @@ class GeminiClient:
             safety_settings=safety_settings,
         )
 
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 resp = await self._client.aio.models.generate_content(
@@ -243,10 +249,13 @@ class GeminiClient:
                 )
                 break
             except Exception as exc:
-                exc_str = str(exc)
-                is_retryable = "429" in exc_str or "503" in exc_str or "500" in exc_str
+                exc_str = str(exc).lower()
+                is_retryable = any(
+                    code in exc_str 
+                    for code in ["429", "503", "500", "resource_exhausted", "deadline_exceeded", "quota", "overloaded"]
+                )
                 if is_retryable and attempt < max_retries - 1:
-                    wait = (attempt + 1) * 2
+                    wait = (attempt + 1) * 5
                     log.warning("Gemini tool %s failed (attempt %d): %s. Retrying in %ds...", model, attempt + 1, exc_str, wait)
                     await asyncio.sleep(wait)
                     continue
@@ -289,7 +298,8 @@ class GeminiClient:
             block_reason = getattr(feedback, "block_reason", None)
             if block_reason:
                 raise RuntimeError(f"Gemini blocked the prompt: {block_reason}")
-            return
+            # Even if no block_reason is found, an empty response is an error for our pipeline.
+            raise RuntimeError("Gemini returned an empty response (no candidates).")
 
         cand = candidates[0]
         finish = getattr(cand, "finish_reason", None)

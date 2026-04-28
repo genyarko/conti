@@ -158,15 +158,57 @@ def _unauthorized(message: str) -> JSONResponse:
 # out through CORSMiddleware, picking up Access-Control-Allow-Origin headers.
 # (Routing Exception via @app.exception_handler hits Starlette's outermost
 # ServerErrorMiddleware, which bypasses user middleware and strips CORS.)
+def _unwrap_exception_group(exc: BaseException) -> BaseException:
+    """Walk single-exception ExceptionGroups down to the underlying error.
+
+    Starlette's BaseHTTPMiddleware on Python 3.11+ uses anyio task groups,
+    which wrap propagated errors in BaseExceptionGroup. A plain
+    `except RuntimeError` won't see through that wrapper, so we unwrap
+    explicitly before deciding which response branch to take.
+    """
+    while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+        exc = exc.exceptions[0]
+    return exc
+
+
 @app.middleware("http")
 async def catch_unhandled_errors(request: Request, call_next):
     try:
         return await call_next(request)
-    except Exception:
+    except Exception as raw_exc:
+        exc = _unwrap_exception_group(raw_exc)
+        if isinstance(exc, (RuntimeError, ValueError)):
+            # These are usually "expected" pipeline failures (e.g. API quota,
+            # malformed LLM response, schema rejection). Return them as 500
+            # but with the real message so the playground can show something
+            # better than "unexpected error".
+            log.warning(
+                "Pipeline error on %s %s: %s",
+                request.method,
+                request.url.path,
+                exc,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "pipeline_error", "message": str(exc)},
+            )
         log.exception("Unhandled error on %s %s", request.method, request.url.path)
+        # Surface the exception class + a truncated message so the playground
+        # can show the *type* of failure (e.g. "ClientError: 404 model not
+        # found") without leaking a full stack. The full traceback is in
+        # server logs via log.exception() above.
+        raw_msg = str(exc).strip()
+        msg = raw_msg.splitlines()[0] if raw_msg else ""
+        if len(msg) > 240:
+            msg = msg[:237] + "..."
+        detail = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "internal_error", "message": "An unexpected error occurred."},
+            content={
+                "error": "internal_error",
+                "message": "An unexpected error occurred.",
+                "detail": detail,
+            },
         )
 
 
