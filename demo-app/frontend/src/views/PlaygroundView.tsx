@@ -15,7 +15,7 @@ export default function PlaygroundView() {
   const [output, setOutput] = useState(SAMPLES[0].output);
   const [mode, setMode] = useState<VerifyMode>("full");
   const { report, error, isLoading, stage, elapsedMs, run, reset } = useVerify();
-  const { catalog, pick, setPick } = useModelCatalog();
+  const { catalog, pick, setPick, isLoading: catalogLoading } = useModelCatalog();
 
   const canSubmit = source.trim().length > 0 && output.trim().length > 0 && !isLoading;
 
@@ -109,14 +109,13 @@ export default function PlaygroundView() {
           )}
         </button>
         <ModeToggle mode={mode} onChange={setMode} disabled={isLoading} />
-        {catalog && (
-          <ModelSelector
-            models={catalog.models}
-            pick={pick}
-            onChange={setPick}
-            disabled={isLoading}
-          />
-        )}
+        <ModelSelector
+          models={catalog?.models ?? []}
+          pick={pick}
+          onChange={setPick}
+          disabled={isLoading}
+          isLoading={catalogLoading || !catalog}
+        />
         {(report || error) && !isLoading && (
           <button type="button" className="btn-ghost" onClick={reset}>
             Clear result

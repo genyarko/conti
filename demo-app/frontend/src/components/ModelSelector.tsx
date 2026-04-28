@@ -7,6 +7,7 @@ interface Props {
   pick: ModelPick | null;
   onChange: (next: ModelPick) => void;
   disabled?: boolean;
+  isLoading?: boolean;
   className?: string;
   label?: string;
 }
@@ -22,11 +23,19 @@ const TIER_LABELS: Record<string, string> = {
   fast: "fast",
 };
 
+const SELECT_CLASSES =
+  "rounded-md border border-line bg-panel px-2 py-1 text-sm text-slate-100 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 disabled:opacity-50";
+
+// Native <option> rendering ignores Tailwind classes on most browsers; inline
+// styles are the only way to guarantee readable colors in dark mode.
+const OPTION_STYLE = { backgroundColor: "#111a2e", color: "#f1f5f9" } as const;
+
 export default function ModelSelector({
   models,
   pick,
   onChange,
   disabled,
+  isLoading,
   className = "",
   label = "Model",
 }: Props) {
@@ -34,6 +43,7 @@ export default function ModelSelector({
   const id = useId();
 
   const value = pick ? `${pick.provider}::${pick.model}` : "";
+  const showPlaceholder = isLoading || models.length === 0;
 
   return (
     <div className={`flex items-center gap-2 ${className}`}>
@@ -43,40 +53,48 @@ export default function ModelSelector({
       >
         {label}
       </label>
-      <select
-        id={id}
-        disabled={disabled}
-        value={value}
-        onChange={(e) => {
-          const [provider, model] = e.target.value.split("::");
-          if (provider && model) {
-            onChange({ provider: provider as ModelPick["provider"], model });
-          }
-        }}
-        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"
-      >
-        {groups.map((group) => (
-          <optgroup
-            key={group.provider}
-            label={PROVIDER_LABELS[group.provider] ?? group.provider}
-          >
-            {group.models.map((m) => {
-              const tier = TIER_LABELS[m.tier] ?? m.tier;
-              const price = `$${m.input_price_per_mtok.toFixed(2)}/$${m.output_price_per_mtok.toFixed(2)}`;
-              const note = m.available ? "" : " — not configured";
-              return (
-                <option
-                  key={`${m.provider}::${m.id}`}
-                  value={`${m.provider}::${m.id}`}
-                  disabled={!m.available}
-                >
-                  {`${m.label} · ${tier} · ${price}/Mtok${note}`}
-                </option>
-              );
-            })}
-          </optgroup>
-        ))}
-      </select>
+      {showPlaceholder ? (
+        <select id={id} disabled className={SELECT_CLASSES}>
+          <option style={OPTION_STYLE}>Loading models…</option>
+        </select>
+      ) : (
+        <select
+          id={id}
+          disabled={disabled}
+          value={value}
+          onChange={(e) => {
+            const [provider, model] = e.target.value.split("::");
+            if (provider && model) {
+              onChange({ provider: provider as ModelPick["provider"], model });
+            }
+          }}
+          className={SELECT_CLASSES}
+        >
+          {groups.map((group) => (
+            <optgroup
+              key={group.provider}
+              label={PROVIDER_LABELS[group.provider] ?? group.provider}
+              style={OPTION_STYLE}
+            >
+              {group.models.map((m) => {
+                const tier = TIER_LABELS[m.tier] ?? m.tier;
+                const price = `$${m.input_price_per_mtok.toFixed(2)}/$${m.output_price_per_mtok.toFixed(2)}`;
+                const note = m.available ? "" : " — not configured";
+                return (
+                  <option
+                    key={`${m.provider}::${m.id}`}
+                    value={`${m.provider}::${m.id}`}
+                    disabled={!m.available}
+                    style={OPTION_STYLE}
+                  >
+                    {`${m.label} · ${tier} · ${price}/Mtok${note}`}
+                  </option>
+                );
+              })}
+            </optgroup>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

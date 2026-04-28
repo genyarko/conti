@@ -28,7 +28,7 @@ export default function ContractUploadView() {
   const [dragOver, setDragOver] = useState(false);
   const [pasted, setPasted] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const { catalog, pick, setPick } = useModelCatalog();
+  const { catalog, pick, setPick, isLoading: catalogLoading } = useModelCatalog();
 
   useEffect(() => {
     let cancelled = false;
@@ -104,17 +104,16 @@ export default function ContractUploadView() {
         </p>
       </section>
 
-      {catalog && (
-        <section className="flex flex-wrap items-center justify-end gap-3">
-          <ModelSelector
-            models={catalog.models}
-            pick={pick}
-            onChange={setPick}
-            disabled={isBusy}
-            label="Analyze with"
-          />
-        </section>
-      )}
+      <section className="flex flex-wrap items-center justify-end gap-3">
+        <ModelSelector
+          models={catalog?.models ?? []}
+          pick={pick}
+          onChange={setPick}
+          disabled={isBusy}
+          isLoading={catalogLoading || !catalog}
+          label="Analyze with"
+        />
+      </section>
 
       <section>
         <div
