@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     gemini_fast_model: str = Field(
         default="gemini-3-flash-preview", alias="GEMINI_FAST_MODEL"
     )
-    gemini_max_tokens: int = Field(default=4096, alias="GEMINI_MAX_TOKENS")
+    gemini_max_tokens: int = Field(default=8192, alias="GEMINI_MAX_TOKENS")
     # Vertex AI / "Gemini Enterprise" path: bills through Cloud (uses trial
     # credit) instead of AI Studio's prepay pool. Auth comes from
     # Application Default Credentials (gcloud auth application-default login),

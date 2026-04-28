@@ -92,7 +92,10 @@ class VerifyPipeline:
         if consistency is None:
             if resolved is not None:
                 consistency = ConsistencyChecker(
-                    client=client, model=resolved.model, ledger=ledger
+                    client=client,
+                    model=resolved.model,
+                    fast_model=resolved.fast_model,
+                    ledger=ledger,
                 )
             else:
                 consistency = ConsistencyChecker(ledger=ledger)

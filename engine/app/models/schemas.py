@@ -246,6 +246,27 @@ class VerifyTrace(BaseModel):
     evidence: list[TraceClaimEvidence] = Field(default_factory=list)
 
 
+class AdversaryInjectedError(BaseModel):
+    type: str
+    injected_claim: str
+    original_fact: str
+    reasoning: str
+
+
+class AdversaryGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_context: str = Field(..., min_length=1)
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+class AdversaryGenerateResponse(BaseModel):
+    summary: str
+    injections: list[AdversaryInjectedError]
+    metadata: ReportMetadata
+
+
 class AuditEvent(BaseModel):
     """A single audit record as returned by `GET /audit/events`."""
 

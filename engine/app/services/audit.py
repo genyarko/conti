@@ -96,27 +96,40 @@ class AuditLog:
             self._path.write_bytes(b"")
 
     def _rotate_locked(self) -> None:
-        target = int(self._max_bytes * self._TRIM_TARGET_RATIO)
+        """Rotate the file by keeping only the trailing target_bytes.
+        
+        Reads from the end to find a line boundary, avoiding loading the 
+        entire file into memory if it has grown significantly beyond cap.
+        """
         try:
-            raw = self._path.read_bytes()
+            current_size = self._path.stat().st_size
         except OSError:
             return
-        if len(raw) <= target:
+            
+        target_size = int(self._max_bytes * self._TRIM_TARGET_RATIO)
+        if current_size <= self._max_bytes:
             return
-        lines = raw.splitlines(keepends=True)
-        total = sum(len(line) for line in lines)
-        dropped = 0
-        idx = 0
-        while idx < len(lines) and total - dropped > target:
-            dropped += len(lines[idx])
-            idx += 1
-        kept = b"".join(lines[idx:])
+
+        # We want to keep approximately target_size bytes from the END.
+        # We'll read slightly more than target_size to find a line break.
+        read_size = int(target_size * 1.1)
+        try:
+            with self._path.open("rb") as f:
+                if current_size > read_size:
+                    f.seek(current_size - read_size)
+                    # Skip the first (likely partial) line
+                    f.readline()
+                kept = f.read()
+        except OSError as exc:
+            log.warning("audit log rotation read failed: %s", exc)
+            return
+
         tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
         try:
             tmp_path.write_bytes(kept)
             os.replace(tmp_path, self._path)
-        except OSError as exc:  # pragma: no cover — disk failure path
-            log.warning("audit log rotation failed: %s", exc)
+        except OSError as exc:
+            log.warning("audit log rotation write failed: %s", exc)
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError:

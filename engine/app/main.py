@@ -16,6 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from engine.app.models.schemas import (
+    AdversaryGenerateRequest,
+    AdversaryGenerateResponse,
+    AdversaryInjectedError,
     AuditEvent,
     AuditEventsResponse,
     BatchItemError,
@@ -24,6 +27,7 @@ from engine.app.models.schemas import (
     Claim,
     ClaimInput,
     IntegrityReport,
+    ReportMetadata,
     TraceClaimEvidence,
     VerifyBatchItem,
     VerifyBatchReport,
@@ -34,6 +38,8 @@ from engine.app.models.schemas import (
     VerifyTrace,
 )
 from engine.app.pipeline.orchestrator import VerifyPipeline
+from engine.app.services.adversary import AdversaryAgent
+from engine.app.services.anthropic_client import TokenLedger
 from engine.app.services.audit import AuditLog, TraceStore, build_verify_record
 from engine.app.services.cache import TTLCache, make_cache_key
 from engine.app.services.metrics import MetricsRegistry
@@ -468,6 +474,7 @@ async def root() -> dict:
             "/verify/quick",
             "/verify/claims",
             "/verify/batch",
+            "/adversary/generate",
             "/stats",
             "/audit/events",
             "/verify/trace/{request_id}",
@@ -996,4 +1003,68 @@ def _build_rollup(
         duration_ms=duration_ms,
         concurrency=concurrency,
         mode=mode,
+    )
+
+
+@app.post(
+    "/adversary/generate",
+    response_model=AdversaryGenerateResponse,
+    tags=["adversary"],
+    summary="Generate an adversarial summary with subtle hallucinations.",
+    description=(
+        "Uses an LLM agent to generate a summary that purposefully includes "
+        "subtle, believable hallucinations and contradictions. Useful for "
+        "stress-testing the TrustLayer's detection limits."
+    ),
+)
+async def adversary_generate(
+    request: AdversaryGenerateRequest, http_request: Request
+) -> AdversaryGenerateResponse:
+    _enforce_size(request.source_context)
+    ledger = TokenLedger()
+    agent = AdversaryAgent(
+        provider=request.provider,
+        model=request.model,
+        ledger=ledger,
+    )
+    
+    t0 = time.perf_counter()
+    output = await agent.generate_adversarial_summary(request.source_context)
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    
+    from engine.app.services import llm_factory
+    resolved = llm_factory.resolve(provider=request.provider, model=request.model)
+    
+    metadata = ReportMetadata(
+        provider=resolved.provider,
+        model=resolved.model,
+        duration_ms=duration_ms,
+    )
+    from engine.app.services.pricing import estimate_cost_usd
+    metadata.input_tokens = ledger.usage.input_tokens
+    metadata.output_tokens = ledger.usage.output_tokens
+    metadata.total_tokens = ledger.usage.total_tokens
+    metadata.estimated_cost_usd = round(
+        estimate_cost_usd(
+            metadata.model,
+            ledger.usage.input_tokens,
+            ledger.usage.output_tokens,
+        ),
+        6,
+    )
+    
+    # We don't audit adversary calls by default to keep the audit log focused 
+    # on verification results, but we could if needed.
+    
+    return AdversaryGenerateResponse(
+        summary=output.summary,
+        injections=[
+            AdversaryInjectedError(
+                type=inj.type,
+                injected_claim=inj.injected_claim,
+                original_fact=inj.original_fact,
+                reasoning=inj.reasoning
+            ) for inj in output.injections
+        ],
+        metadata=metadata
     )

@@ -9,6 +9,19 @@
   it should bypass to a "does the document contain anything about X?" check. That fixes the second bug too (the Set-off case still has a real grounded half, but absence
   claims as a class shouldn't be measured by clause-level grounding).
 
+  *** Strong agree                                                                                                                                                                
+  - Batched LLM operations — real latency/cost win, low risk, standard optimization. Easiest ROI on the list.
+  - Flash vs. Pro tiering — directly leverages what you already have. Cheap claims (string-match misses) don't need Pro; cross-clause contradiction reasoning does. Concrete  
+  and measurable.                                                                                                                                                           
+  - Red-teaming / adversarial agent — this is the one that turns "we detect hallucinations" into a defensible claim. Without an adversarial harness, you have no recall     
+  number. Best credibility-per-effort item here.
+
+  Mixed
+  - Vector-based grounding — only worth it if you're actually hitting context limits on real contracts. For typical contracts (sub-100 pages), rapidfuzz + targeted LLM checks
+   is often better than embeddings, which blur exact-clause matching. Don't add a vector DB to look enterprise-y.
+  - HITL feedback — logging corrections as a gold-standard set: yes. "Fine-tune future models": overselling, drop that framing. A growing eval set is the real value.
+  - Verification graph — strong demo asset, but only if relationships are dense enough to visualize meaningfully. Risk of looking like a sparse, gimmicky chart.
+
 ---
 
 ## Architecture

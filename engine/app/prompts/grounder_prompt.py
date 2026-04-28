@@ -64,6 +64,11 @@ Given a single CLAIM and a SOURCE text, decide whether the source supports the c
 
 Be strict. When unsure, prefer "partial" over "full" and "none" over "partial". Do not use outside knowledge — only what is in the SOURCE block.
 
+Pay special attention to:
+- Absolute terms: If the source says "all", "never", "always", or "none", ensure the claim doesn't introduce exceptions or nuances not in the text.
+- Specific numbers/dates: Any deviation in a number (e.g., 10 days vs 30 days) is a contradiction.
+- Legal opposites: If a source says a fee is "non-refundable under any circumstances", any claim of a "pro-rated refund" is a contradiction (support: none).
+
 # matched_passage
 When support is "full" or "partial", return the SHORTEST verbatim contiguous slice of the SOURCE that best supports the claim. It MUST appear in the source character-for-character. When support is "none", set matched_passage to null.
 
@@ -91,6 +96,11 @@ Given a list of CLAIMS and a SOURCE text, decide for EACH claim whether the sour
 - "none": The source does not support the claim. The claim is fabricated, contradicted by the source, or about something the source never addresses.
 
 Be strict. When unsure, prefer "partial" over "full" and "none" over "partial". Do not use outside knowledge — only what is in the SOURCE block.
+
+Pay special attention to:
+- Absolute terms: If the source says "all", "never", "always", or "none", ensure the claim doesn't introduce exceptions or nuances not in the text.
+- Specific numbers/dates: Any deviation in a number (e.g., 10 days vs 30 days) is a contradiction.
+- Legal opposites: If a source says a fee is "non-refundable under any circumstances", any claim of a "pro-rated refund" is a contradiction (support: none).
 
 # matched_passage
 When support is "full" or "partial", return the SHORTEST verbatim contiguous slice of the SOURCE that best supports the claim. It MUST appear in the source character-for-character. When support is "none", set matched_passage to null.

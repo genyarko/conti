@@ -152,27 +152,34 @@ class ConsistencyChecker:
         client: Optional[_LLMClient] = None,
         *,
         model: Optional[str] = None,
+        fast_model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         ledger: Optional[TokenLedger] = None,
     ) -> None:
         if client is None:
             resolved = llm_factory.resolve()
             self._client = llm_factory.get_client(resolved.provider)
-            self._model = model or resolved.fast_model
+            self._model = model or resolved.model
+            self._fast_model = fast_model or resolved.fast_model
         else:
             self._client = client
-            self._model = model or settings.anthropic_fast_model
+            self._model = model or settings.anthropic_model
+            self._fast_model = fast_model or settings.anthropic_fast_model
+        
+        # We use the flagship model's limit for max_tokens if not specified,
+        # but individual calls will use llm_factory.max_tokens_for() if needed.
         self._max_tokens = max_tokens or llm_factory.max_tokens_for(self._model)
         self._ledger = ledger
 
     async def check_source(
         self, claim: Claim, source_context: str
     ) -> tuple[ConsistencyVerdict, int, str]:
+        # Source checks are relatively simple -> use the fast model.
         raw = await self._client.create_message(
             system=CONSISTENCY_SYSTEM_PROMPT,
             user=build_consistency_user_prompt(claim.text, source_context),
-            model=self._model,
-            max_tokens=self._max_tokens,
+            model=self._fast_model,
+            max_tokens=llm_factory.max_tokens_for(self._fast_model),
             response_schema=CONSISTENCY_RESPONSE_SCHEMA,
         )
         if self._ledger is not None:
@@ -184,6 +191,7 @@ class ConsistencyChecker:
     ) -> list[ContradictionPair]:
         if len(claims) < 2:
             return []
+        # Internal contradictions require higher reasoning -> use the flagship model.
         raw = await self._client.create_message(
             system=CONTRADICTION_SYSTEM_PROMPT,
             user=build_contradiction_user_prompt(
@@ -242,13 +250,14 @@ class ConsistencyChecker:
             batches = [claims[i : i + batch_size] for i in range(0, len(claims), batch_size)]
             
             async def run_batch(batch: list[Claim]):
+                # Batched source checks are also simple -> use the fast model.
                 raw = await self._client.create_message(
                     system=CONSISTENCY_BATCH_SYSTEM_PROMPT,
                     user=build_consistency_batch_user_prompt(
                         [(c.id, c.text) for c in batch], source_context
                     ),
-                    model=self._model,
-                    max_tokens=self._max_tokens,
+                    model=self._fast_model,
+                    max_tokens=llm_factory.max_tokens_for(self._fast_model),
                     response_schema=CONSISTENCY_BATCH_RESPONSE_SCHEMA,
                 )
                 if self._ledger is not None:

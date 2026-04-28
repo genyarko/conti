@@ -315,6 +315,29 @@ async def test_single_claim_skips_contradiction_call():
 
 
 @pytest.mark.asyncio
+async def test_dynamic_model_selection():
+    c1 = Claim(id="c1", text="Claim 1")
+    c2 = Claim(id="c2", text="Claim 2")
+    fake = FakeClient(
+        responses=[
+            _cbresp([("c1", "consistent", 9, "ok"), ("c2", "consistent", 9, "ok")]),
+            _xresp([]),
+        ]
+    )
+    # flagship model = "pro", fast model = "flash"
+    checker = ConsistencyChecker(
+        client=fake, model="pro", fast_model="flash", max_tokens=256
+    )
+    await checker.check([c1, c2], SOURCE)
+
+    assert len(fake.calls) == 2
+    # Batch source check should use flash.
+    assert fake.calls[0]["model"] == "flash"
+    # Contradiction detection should use pro.
+    assert fake.calls[1]["model"] == "pro"
+
+
+@pytest.mark.asyncio
 async def test_malformed_consistency_response_raises():
     claim = Claim(id="c1", text="Anything.")
     fake = FakeClient(responses=["not json", _xresp([])])
