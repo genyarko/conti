@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -103,15 +104,47 @@ class GeminiClient:
         assert self._client is not None
         _, genai_types = _import_genai()
         contents = self._build_contents(user, image_parts, genai_types)
+        
+        # Disable safety filters to prevent silent failures on adversarial samples.
+        safety_settings = [
+            genai_types.SafetySetting(
+                category=cat,
+                threshold="BLOCK_NONE",
+            )
+            for cat in [
+                "HATE_SPEECH",
+                "HARASSMENT",
+                "SEXUALLY_EXPLICIT",
+                "DANGEROUS_CONTENT",
+                "CIVIC_INTEGRITY",
+            ]
+        ]
+
         config = genai_types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=max_tokens,
+            safety_settings=safety_settings,
         )
-        resp = await self._client.aio.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+                break
+            except Exception as exc:
+                exc_str = str(exc)
+                is_retryable = "429" in exc_str or "503" in exc_str or "500" in exc_str
+                if is_retryable and attempt < max_retries - 1:
+                    wait = (attempt + 1) * 2
+                    log.warning("Gemini %s failed (attempt %d): %s. Retrying in %ds...", model, attempt + 1, exc_str, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(f"Gemini API call failed after {attempt+1} attempts: {exc}") from exc
+
         self._reject_truncated(resp, max_tokens)
         return self._extract_text(resp)
 
@@ -142,6 +175,21 @@ class GeminiClient:
             parameters=input_schema,
         )
         tool = genai_types.Tool(function_declarations=[function_decl])
+        
+        safety_settings = [
+            genai_types.SafetySetting(
+                category=cat,
+                threshold="BLOCK_NONE",
+            )
+            for cat in [
+                "HATE_SPEECH",
+                "HARASSMENT",
+                "SEXUALLY_EXPLICIT",
+                "DANGEROUS_CONTENT",
+                "CIVIC_INTEGRITY",
+            ]
+        ]
+
         config = genai_types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=max_tokens,
@@ -152,13 +200,28 @@ class GeminiClient:
                     allowed_function_names=[tool_name],
                 ),
             ),
+            safety_settings=safety_settings,
         )
 
-        resp = await self._client.aio.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+                break
+            except Exception as exc:
+                exc_str = str(exc)
+                is_retryable = "429" in exc_str or "503" in exc_str or "500" in exc_str
+                if is_retryable and attempt < max_retries - 1:
+                    wait = (attempt + 1) * 2
+                    log.warning("Gemini tool %s failed (attempt %d): %s. Retrying in %ds...", model, attempt + 1, exc_str, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(f"Gemini tool call failed after {attempt+1} attempts: {exc}") from exc
+
         self._reject_truncated(resp, max_tokens)
         return self._extract_function_args(resp, tool_name)
 
@@ -182,22 +245,37 @@ class GeminiClient:
     def _reject_truncated(resp: Any, max_tokens: int) -> None:
         candidates = getattr(resp, "candidates", None) or []
         if not candidates:
+            # Check prompt feedback for block reason.
+            feedback = getattr(resp, "prompt_feedback", None)
+            block_reason = getattr(feedback, "block_reason", None)
+            if block_reason:
+                raise RuntimeError(f"Gemini blocked the prompt: {block_reason}")
             return
-        finish = getattr(candidates[0], "finish_reason", None)
+
+        cand = candidates[0]
+        finish = getattr(cand, "finish_reason", None)
         finish_str = (
             getattr(finish, "name", None) or str(finish or "")
         ).upper()
+
         if finish_str == "MAX_TOKENS":
             raise RuntimeError(
                 f"Gemini response was truncated at max_tokens={max_tokens}. "
                 "Increase GEMINI_MAX_TOKENS or shorten the input."
             )
+        
+        if finish_str in ("SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "OTHER"):
+            raise RuntimeError(f"Gemini blocked the response: {finish_str}")
 
     @staticmethod
     def _extract_text(resp: Any) -> str:
-        text = getattr(resp, "text", None)
-        if isinstance(text, str) and text:
-            return text
+        """Safely extract text from the response, avoiding property-access errors."""
+        try:
+            return resp.text
+        except Exception:
+            pass
+
+        # Fallback: walk candidates → content → parts.
         parts: list[str] = []
         for cand in getattr(resp, "candidates", None) or []:
             content = getattr(cand, "content", None)
