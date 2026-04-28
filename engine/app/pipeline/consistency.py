@@ -234,16 +234,13 @@ class ConsistencyChecker:
         source_results_map: dict[str, tuple[ConsistencyVerdict, int, str]] = {}
         
         if len(claims) == 1:
-            # Maintain backward compatibility and individual behavior for single claims.
-            # We still need to call find_contradictions to maintain the expected call count/order in tests,
-            # though it will short-circuit for a single claim.
-            source_task = asyncio.create_task(self.check_source(claims[0], source_context))
-            contradiction_task = asyncio.create_task(self.find_contradictions(claims))
-            
-            verdict, confidence, reasoning = await source_task
+            # A single claim cannot contradict anything, so skip the
+            # contradiction sweep entirely.
+            verdict, confidence, reasoning = await self.check_source(
+                claims[0], source_context
+            )
             source_results_map[claims[0].id] = (verdict, confidence, reasoning)
-            contradictions = await contradiction_task
-            contradicts_by_id = _contradicts_index(contradictions)
+            contradicts_by_id = {}
         else:
             # Batch multiple claims.
             batch_size = settings.pipeline_batch_size

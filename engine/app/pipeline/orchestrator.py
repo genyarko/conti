@@ -121,8 +121,14 @@ class VerifyPipeline:
     def _new_metadata(self, resolved: llm_factory.Resolved) -> ReportMetadata:
         # Stamp the metadata with the *resolved* provider+model that actually
         # ran — fixing the prior bug where metadata.model said "Opus" while
-        # Haiku did the work.
-        return ReportMetadata(provider=resolved.provider, model=resolved.model)
+        # Haiku did the work. `fast_model` exposes the cheaper tier most calls
+        # actually hit (extractor, grounder, source-consistency); `model` is
+        # the flagship reserved for contradiction detection.
+        return ReportMetadata(
+            provider=resolved.provider,
+            model=resolved.model,
+            fast_model=resolved.fast_model,
+        )
 
     def _apply_usage(
         self, metadata: ReportMetadata, ledger: TokenLedger

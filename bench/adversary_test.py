@@ -56,18 +56,37 @@ async def run_adversary_test(source_path: str, provider: str = None, model: str 
         print("\n[Flagged Claims]")
         for f in report.flagged:
             print(f"- {f.reasoning}")
-            
-    # Simple evaluation
-    injected_claims = [inj.injected_claim.lower() for inj in adversarial_output.injections]
+
+    # Per-injection catch evaluation: match against the extracted claim text
+    # tied to each caught verdict (claim_id → text), and fall back to reasoning.
+    # Using rapidfuzz token_set_ratio is more robust than substring because the
+    # extractor often paraphrases or re-segments the original injected sentence.
+    from rapidfuzz import fuzz
+    claim_text_by_id = {c.id: c.text for c in report.claims}
+    caught_verdicts = report.hallucinations + report.flagged
+    MATCH_THRESHOLD = 70  # token_set_ratio >= 70 ≈ "same proposition, paraphrased"
+
+    print("\n[Injection Catch Report]")
     caught_count = 0
-    for h in report.hallucinations + report.flagged:
-        # Check if the text of any caught claim matches an injected claim (fuzzy-ish)
-        # In practice, the extractor might split them differently, so we look for substrings
-        for inj_text in injected_claims:
-            if inj_text in h.reasoning.lower() or any(inj_text in c.text.lower() for c in report.claims if c.id == h.claim_id):
-                caught_count += 1
-                break
-                
+    for inj in adversarial_output.injections:
+        needle = inj.injected_claim.lower()
+        best_score = 0
+        best_claim_id = None
+        for v in caught_verdicts:
+            haystacks = [claim_text_by_id.get(v.claim_id, "").lower(), v.reasoning.lower()]
+            for hay in haystacks:
+                if not hay:
+                    continue
+                score = fuzz.token_set_ratio(needle, hay)
+                if score > best_score:
+                    best_score = score
+                    best_claim_id = v.claim_id
+        hit = best_score >= MATCH_THRESHOLD
+        caught_count += int(hit)
+        marker = "CAUGHT" if hit else "MISSED"
+        print(f"- [{marker}] ({inj.type}) score={best_score} via={best_claim_id}")
+        print(f"    injected: {inj.injected_claim}")
+
     print(f"\nSummary: Caught {caught_count} out of {len(adversarial_output.injections)} injected errors.")
 
 if __name__ == "__main__":

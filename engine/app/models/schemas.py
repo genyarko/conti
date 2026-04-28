@@ -129,6 +129,14 @@ class ClaimVerdict(BaseModel):
 class ReportMetadata(BaseModel):
     provider: str = "anthropic"
     model: str
+    fast_model: Optional[str] = Field(
+        default=None,
+        description=(
+            "Per-stage fast tier (extractor + grounder + source-consistency). "
+            "`model` is the flagship used for cross-claim contradiction "
+            "detection. May equal `model` when the configured tiers collapse."
+        ),
+    )
     request_id: str = Field(default_factory=lambda: _new_id("req"))
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(tz=timezone.utc)

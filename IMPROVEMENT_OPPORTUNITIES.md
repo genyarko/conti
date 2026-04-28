@@ -8,9 +8,10 @@ While Project Conti is highly robust and mature, several areas could be enhanced
 *   **Current:** Uses a hybrid of `rapidfuzz` (string matching) and single-turn LLM semantic checks.
 *   **Improvement:** For long documents, integrate a vector database (like Chroma or Pinecone) to perform semantic search. This allows for more precise "matched passage" identification in very large contracts where passing the entire context to an LLM is expensive or hits token limits.
 
-### 📦 Batched LLM Operations
-*   **Current:** `ConsistencyChecker` and `ClaimGrounder` iterate over claims, often triggering many parallel API calls.
-*   **Improvement:** Implement batching logic to group multiple claims into a single LLM request where possible. This reduces latency, lowers the risk of hitting rate limits, and can be more cost-effective.
+### 📦 Batched LLM Operations — *shipped*
+*   **Was:** `ConsistencyChecker` and `ClaimGrounder` iterated over claims, triggering many parallel API calls.
+*   **Now:** Both checkers chunk claims into `PIPELINE_BATCH_SIZE` (default 5) and issue one LLM call per batch, with per-claim retry on omitted IDs. Source-consistency batches run in parallel with the contradiction sweep. Grounder still does a fast `rapidfuzz` pass first and only batches the semantic fallbacks.
+*   **Future:** Consider a per-source-context cache key so identical contracts re-use prior batch results.
 
 ### 🎭 Multi-Agent Debate for Verification
 *   **Current:** A linear pipeline (Extract -> Ground -> Check).
@@ -22,9 +23,10 @@ While Project Conti is highly robust and mature, several areas could be enhanced
 *   **Current:** Renders PDF pages to images for the initial analysis.
 *   **Improvement:** Allow the user to click on a detected hallucination and have Gemini "re-scan" the specific *visual* area of the original PDF in high resolution to prove the supporting text isn't there (or is misrepresented).
 
-### 🧠 Gemini Flash vs. Pro Tiering
-*   **Current:** Pipeline uses a fixed "fast_model" and "model".
-*   **Improvement:** Implement dynamic model selection based on claim complexity. Simple string-match failures go to Gemini Flash; complex internal contradictions go to Gemini Pro.
+### 🧠 Gemini Flash vs. Pro Tiering — *shipped (operation-type routing)*
+*   **Was:** Pipeline used a single model for all stages.
+*   **Now:** Stage-level tiering — extractor, grounder, and per-claim source-consistency run on Flash; cross-claim contradiction detection runs on Pro. `ReportMetadata` exposes both `model` and `fast_model` so consumers can attribute cost honestly. Note: takes effect only when `DEFAULT_MODEL` is set to the Pro variant; the current default collapses both tiers to Flash for cost.
+*   **Future:** Per-claim complexity scoring (e.g., escalate quantitative or absolute-term claims to Pro on a per-row basis) — deferred because scoring before routing adds latency.
 
 ## 3. User Experience & Enterprise Features
 
@@ -42,6 +44,7 @@ While Project Conti is highly robust and mature, several areas could be enhanced
 
 ## 4. Operational & Security Enhancements
 
-### 🛡️ Red-Teaming & Stress Testing
-*   **Current:** Basic tests for pipeline correctness.
-*   **Improvement:** Build an automated "adversarial" agent that attempts to inject subtle, believable hallucinations into contract summaries to test the TrustLayer's detection limits.
+### 🛡️ Red-Teaming & Stress Testing — *shipped*
+*   **Was:** Only correctness tests.
+*   **Now:** `AdversaryAgent` (`engine/app/services/adversary.py`) generates a believable summary plus a manifest of 2 hallucinations + 1 contradiction; `bench/adversary_test.py` runs it through `VerifyPipeline` and reports per-injection caught/missed via `rapidfuzz` token-set matching against the extracted claim text. Captured baseline lives in `red-teaming-test-result.md`.
+*   **Future:** Loop the harness over a corpus of contract types and persist a regression score; promote the bench to CI once the catch rate is stable.
