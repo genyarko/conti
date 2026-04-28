@@ -56,6 +56,17 @@ def _cresp(verdict: str, confidence: int = 8, reasoning: str = "ok") -> str:
     )
 
 
+def _cbresp(results: list[tuple[str, str, int, str]]) -> str:
+    return json.dumps(
+        {
+            "results": [
+                {"claim_id": cid, "verdict": v, "confidence": c, "reasoning": r}
+                for cid, v, c, r in results
+            ]
+        }
+    )
+
+
 def _xresp(pairs: list[dict]) -> str:
     return json.dumps({"contradictions": pairs})
 
@@ -215,9 +226,15 @@ async def test_contradicting_claims_are_linked_bidirectionally():
     c2 = Claim(id="c2", text="The agreement does not auto-renew.")
     fake = FakeClient(
         responses=[
-            _cresp("consistent", 9),  # c1 source check
-            _cresp("contradictory", 9),  # c2 source check
-            _xresp([{"claim_a": "c1", "claim_b": "c2", "reasoning": "direct opposite"}]),
+            _cbresp(
+                [
+                    ("c1", "consistent", 9, "ok"),
+                    ("c2", "contradictory", 9, "ok"),
+                ]
+            ),
+            _xresp(
+                [{"claim_a": "c1", "claim_b": "c2", "reasoning": "direct opposite"}]
+            ),
         ]
     )
     checker = ConsistencyChecker(client=fake, model="m", max_tokens=256)

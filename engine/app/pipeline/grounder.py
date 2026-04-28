@@ -11,8 +11,11 @@ from rapidfuzz import fuzz
 
 from engine.app.models.schemas import Claim, GroundingLevel
 from engine.app.prompts.grounder_prompt import (
+    GROUNDER_BATCH_RESPONSE_SCHEMA,
+    GROUNDER_BATCH_SYSTEM_PROMPT,
     GROUNDER_RESPONSE_SCHEMA,
     GROUNDER_SYSTEM_PROMPT,
+    build_grounder_batch_user_prompt,
     build_grounder_user_prompt,
 )
 from engine.app.services.anthropic_client import (
@@ -106,8 +109,10 @@ def _parse_grounder_response(raw: str) -> dict[str, Any]:
         if not match:
             raise ValueError(f"Grounder returned non-JSON output: {raw[:200]!r}")
         data = json.loads(match.group(0))
-    if not isinstance(data, dict) or "support" not in data:
-        raise ValueError("Grounder JSON missing 'support' key.")
+    if not isinstance(data, dict):
+        raise ValueError("Grounder JSON must be an object.")
+    if "support" not in data and "results" not in data:
+        raise ValueError("Grounder JSON missing required keys ('support' or 'results').")
     return data
 
 
@@ -170,6 +175,11 @@ class ClaimGrounder:
                 reasoning="Direct textual match against source.",
             )
 
+        return await self._ground_single_with_match(claim, source_context, match)
+
+    async def _ground_single_with_match(
+        self, claim: Claim, source_context: str, match: PassageMatch
+    ) -> GroundingResult:
         # Semantic fallback via the configured LLM provider.
         raw = await self._client.create_message(
             system=GROUNDER_SYSTEM_PROMPT,
@@ -181,6 +191,15 @@ class ClaimGrounder:
         if self._ledger is not None:
             self._ledger.record_from(self._client)
         data = _parse_grounder_response(raw)
+        return self._build_result(claim, data, source_context, match)
+
+    def _build_result(
+        self,
+        claim: Claim,
+        data: dict[str, Any],
+        source_context: str,
+        match: PassageMatch,
+    ) -> GroundingResult:
         support = str(data.get("support", "none")).lower().strip()
         passage = data.get("matched_passage")
         if isinstance(passage, str):
@@ -216,9 +235,85 @@ class ClaimGrounder:
     ) -> list[GroundingResult]:
         if not claims:
             return []
-        return await asyncio.gather(
-            *(self.ground(c, source_context) for c in claims)
-        )
+
+        source_context = source_context or ""
+        results_by_id: dict[str, GroundingResult] = {}
+        to_fallback: list[tuple[Claim, PassageMatch]] = []
+
+        # 1. First pass: try fast string matching for everyone.
+        for claim in claims:
+            if not source_context.strip():
+                results_by_id[claim.id] = GroundingResult(
+                    claim_id=claim.id,
+                    grounding_score=0,
+                    grounding_level=GroundingLevel.UNGROUNDED,
+                    matched_passage=None,
+                    match_location=None,
+                    reasoning="Source context is empty.",
+                )
+                continue
+
+            query = claim.source_quote or claim.text
+            match = _best_match(query, source_context)
+            if match.score >= settings.grounding_threshold_verified:
+                results_by_id[claim.id] = GroundingResult(
+                    claim_id=claim.id,
+                    grounding_score=match.score,
+                    grounding_level=GroundingLevel.GROUNDED,
+                    matched_passage=match.passage,
+                    match_location=(match.start, match.end),
+                    reasoning="Direct textual match against source.",
+                )
+            else:
+                to_fallback.append((claim, match))
+
+        # 2. Second pass: batch the semantic fallbacks.
+        if to_fallback:
+            if len(to_fallback) == 1:
+                # Individual fallback (avoid re-running string match).
+                claim, match = to_fallback[0]
+                results_by_id[claim.id] = await self._ground_single_with_match(
+                    claim, source_context, match
+                )
+            else:
+                batch_size = settings.pipeline_batch_size
+                batches = [to_fallback[i : i + batch_size] for i in range(0, len(to_fallback), batch_size)]
+
+                async def run_batch(batch: list[tuple[Claim, PassageMatch]]):
+                    raw = await self._client.create_message(
+                        system=GROUNDER_BATCH_SYSTEM_PROMPT,
+                        user=build_grounder_batch_user_prompt(
+                            [(c.id, c.text) for c, _ in batch], source_context
+                        ),
+                        model=self._model,
+                        max_tokens=self._max_tokens,
+                        response_schema=GROUNDER_BATCH_RESPONSE_SCHEMA,
+                    )
+                    if self._ledger is not None:
+                        self._ledger.record_from(self._client)
+                    return _parse_grounder_response(raw)
+
+                batch_responses = await asyncio.gather(*(run_batch(b) for b in batches))
+
+                for i, data in enumerate(batch_responses):
+                    batch = batches[i]
+                    batch_results = data.get("results", [])
+                    results_map = {r.get("claim_id"): r for r in batch_results if r.get("claim_id")}
+
+                    for claim, match in batch:
+                        res_data = results_map.get(claim.id)
+                        if res_data:
+                            results_by_id[claim.id] = self._build_result(
+                                claim, res_data, source_context, match
+                            )
+                        else:
+                            # Retry missing claim individually.
+                            log.warning("Batch grounder omitted claim %s, retrying individually", claim.id)
+                            results_by_id[claim.id] = await self._ground_single_with_match(
+                                claim, source_context, match
+                            )
+
+        return [results_by_id[c.id] for c in claims]
 
 
 async def ground_claims(

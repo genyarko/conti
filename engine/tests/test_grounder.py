@@ -285,6 +285,50 @@ async def test_ground_many_runs_all_claims_concurrently():
 
 
 @pytest.mark.asyncio
+async def test_ground_many_batches_multiple_fallbacks():
+    # Two claims that both need semantic fallback.
+    claims = [
+        Claim(id="c1", text="Gustave Eiffel's firm built the structure."),
+        Claim(id="c2", text="It was the world's tallest building for 41 years."),
+    ]
+    
+    # Mock a single batch response containing results for both claims.
+    batch_response = json.dumps({
+        "results": [
+            {
+                "claim_id": "c1",
+                "support": "full",
+                "matched_passage": "designed and built the tower",
+                "confidence": 95,
+                "reasoning": "Explicit support for construction."
+            },
+            {
+                "claim_id": "c2",
+                "support": "full",
+                "matched_passage": "tallest man-made structure in the world for 41 years",
+                "confidence": 98,
+                "reasoning": "Direct match for height record duration."
+            }
+        ]
+    })
+    
+    fake = FakeClient(responses=[batch_response])
+    grounder = ClaimGrounder(client=fake, model="m", max_tokens=256)
+    results = await grounder.ground_many(claims, SOURCE)
+
+    assert len(results) == 2
+    assert results[0].claim_id == "c1"
+    assert results[0].grounding_level == GroundingLevel.GROUNDED
+    assert results[1].claim_id == "c2"
+    assert results[1].grounding_level == GroundingLevel.GROUNDED
+    
+    # Verify exactly one batch LLM call was made.
+    assert len(fake.calls) == 1
+    assert "c1" in fake.calls[0]["user"]
+    assert "c2" in fake.calls[0]["user"]
+
+
+@pytest.mark.asyncio
 async def test_ground_many_empty_list_makes_no_calls():
     fake = FakeClient(responses=[])
     grounder = ClaimGrounder(client=fake, model="m", max_tokens=256)

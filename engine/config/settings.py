@@ -141,6 +141,9 @@ class Settings(BaseSettings):
     hallucination_grounding_max: int = Field(
         default=50, alias="HALLUCINATION_GROUNDING_MAX"
     )
+    # Claims per batched LLM call inside ConsistencyChecker / ClaimGrounder.
+    # Smaller = safer prompts on long sources; larger = fewer round-trips.
+    pipeline_batch_size: int = Field(default=5, alias="PIPELINE_BATCH_SIZE")
 
     @field_validator("cors_origins", "trusted_proxy_ips", mode="before")
     @classmethod

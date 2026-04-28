@@ -9,10 +9,13 @@ from typing import Any, Optional
 
 from engine.app.models.schemas import Claim, ConsistencyVerdict
 from engine.app.prompts.consistency_prompt import (
+    CONSISTENCY_BATCH_RESPONSE_SCHEMA,
+    CONSISTENCY_BATCH_SYSTEM_PROMPT,
     CONSISTENCY_RESPONSE_SCHEMA,
     CONSISTENCY_SYSTEM_PROMPT,
     CONTRADICTION_RESPONSE_SCHEMA,
     CONTRADICTION_SYSTEM_PROMPT,
+    build_consistency_batch_user_prompt,
     build_consistency_user_prompt,
     build_contradiction_user_prompt,
 )
@@ -219,17 +222,74 @@ class ConsistencyChecker:
                 for c in claims
             ]
 
-        source_task = asyncio.gather(
-            *(self.check_source(c, source_context) for c in claims)
-        )
-        contradiction_task = asyncio.create_task(self.find_contradictions(claims))
-        source_results, contradictions = await asyncio.gather(
-            source_task, contradiction_task
-        )
+        # 1. Source consistency checks.
+        source_results_map: dict[str, tuple[ConsistencyVerdict, int, str]] = {}
+        
+        if len(claims) == 1:
+            # Maintain backward compatibility and individual behavior for single claims.
+            # We still need to call find_contradictions to maintain the expected call count/order in tests,
+            # though it will short-circuit for a single claim.
+            source_task = asyncio.create_task(self.check_source(claims[0], source_context))
+            contradiction_task = asyncio.create_task(self.find_contradictions(claims))
+            
+            verdict, confidence, reasoning = await source_task
+            source_results_map[claims[0].id] = (verdict, confidence, reasoning)
+            contradictions = await contradiction_task
+            contradicts_by_id = _contradicts_index(contradictions)
+        else:
+            # Batch multiple claims.
+            batch_size = settings.pipeline_batch_size
+            batches = [claims[i : i + batch_size] for i in range(0, len(claims), batch_size)]
+            
+            async def run_batch(batch: list[Claim]):
+                raw = await self._client.create_message(
+                    system=CONSISTENCY_BATCH_SYSTEM_PROMPT,
+                    user=build_consistency_batch_user_prompt(
+                        [(c.id, c.text) for c in batch], source_context
+                    ),
+                    model=self._model,
+                    max_tokens=self._max_tokens,
+                    response_schema=CONSISTENCY_BATCH_RESPONSE_SCHEMA,
+                )
+                if self._ledger is not None:
+                    self._ledger.record_from(self._client)
+                return _parse_json_object(raw)
 
-        contradicts_by_id = _contradicts_index(contradictions)
+            # We create tasks in order: source batches first, then contradiction.
+            # This ensures FakeClient (which is sequential) sees the expected call order.
+            source_tasks = [asyncio.create_task(run_batch(b)) for b in batches]
+            contradiction_task = asyncio.create_task(self.find_contradictions(claims))
+
+            batch_responses = await asyncio.gather(*source_tasks)
+            
+            for i, data in enumerate(batch_responses):
+                batch = batches[i]
+                batch_results = data.get("results", [])
+                results_map = {r.get("claim_id"): r for r in batch_results if r.get("claim_id")}
+                
+                for claim in batch:
+                    r = results_map.get(claim.id)
+                    if r:
+                        source_results_map[claim.id] = (
+                            _coerce_verdict(r.get("verdict")),
+                            _coerce_confidence(r.get("confidence", 5)),
+                            str(r.get("reasoning") or "").strip()
+                        )
+                    else:
+                        # Retry missing claim individually.
+                        log.warning("Batch consistency check omitted claim %s, retrying individually", claim.id)
+                        source_results_map[claim.id] = await self.check_source(claim, source_context)
+            
+            contradictions = await contradiction_task
+            contradicts_by_id = _contradicts_index(contradictions)
+
+        # 3. Assemble final results.
         results: list[ConsistencyResult] = []
-        for claim, (verdict, confidence, reasoning) in zip(claims, source_results):
+        for claim in claims:
+            verdict, confidence, reasoning = source_results_map.get(
+                claim.id, 
+                (ConsistencyVerdict.INCONSISTENT, 5, "Batch check failed to return a result.")
+            )
             conflicts = contradicts_by_id.get(claim.id, set())
             internal_ok = len(conflicts) == 0
             # A claim participating in a contradiction escalates to contradictory.
