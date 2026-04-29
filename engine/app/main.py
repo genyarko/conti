@@ -43,6 +43,12 @@ from engine.app.services.anthropic_client import TokenLedger
 from engine.app.services.audit import AuditLog, TraceStore, build_verify_record
 from engine.app.services.cache import TTLCache, make_cache_key
 from engine.app.services.metrics import MetricsRegistry
+from engine.app.services.postgres import (
+    PgAuditLog,
+    PgTraceStore,
+    PostgresStore,
+    run_trace_sweeper,
+)
 from engine.app.services.rate_limit import SlidingWindowRateLimiter
 from engine.config import settings
 
@@ -61,26 +67,61 @@ _rate_limiter = SlidingWindowRateLimiter(
     limit_per_minute=settings.rate_limit_per_minute
 )
 _metrics = MetricsRegistry()
-_audit_log = AuditLog(
+# Default to the file/in-memory backends; lifespan swaps these in for the
+# Postgres variants when DATABASE_URL is configured.
+_audit_log: "AuditLog | PgAuditLog" = AuditLog(
     path=Path(settings.audit_path),
     max_bytes=settings.audit_max_bytes,
     enabled=settings.audit_enabled,
 )
-_trace_store = TraceStore(
+_trace_store: "TraceStore | PgTraceStore" = TraceStore(
     ttl_seconds=settings.trace_ttl_seconds,
     max_entries=settings.trace_max_entries,
     enabled=settings.trace_enabled,
 )
+_pg_store: Optional[PostgresStore] = None
+_sweeper_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _audit_log, _trace_store, _pg_store, _sweeper_task
+
     log.info(
         "TrustLayer engine starting (env=%s, default=%s/%s)",
         settings.engine_env,
         settings.default_provider,
         settings.default_model,
     )
+
+    if settings.database_url:
+        try:
+            _pg_store = PostgresStore(
+                settings.database_url,
+                min_size=settings.database_pool_min,
+                max_size=settings.database_pool_max,
+            )
+            await _pg_store.connect()
+            _audit_log = PgAuditLog(_pg_store, enabled=settings.audit_enabled)
+            _trace_store = PgTraceStore(
+                _pg_store,
+                ttl_seconds=settings.trace_ttl_seconds,
+                enabled=settings.trace_enabled,
+            )
+            _sweeper_task = asyncio.create_task(
+                run_trace_sweeper(
+                    _pg_store,
+                    interval_seconds=settings.trace_sweeper_interval_seconds,
+                )
+            )
+            log.info("Postgres-backed audit + trace storage active.")
+        except Exception as exc:  # noqa: BLE001 — never block startup on DB
+            log.exception(
+                "Failed to initialize Postgres storage; falling back to "
+                "JSONL/in-memory backends. Error: %s",
+                exc,
+            )
+            _pg_store = None
     google_configured = bool(settings.gemini_api_key) or (
         settings.gemini_use_vertex and bool(settings.gemini_project)
     )
@@ -106,6 +147,15 @@ async def lifespan(app: FastAPI):
             "Do not deploy to a public URL without setting this."
         )
     yield
+
+    if _sweeper_task is not None:
+        _sweeper_task.cancel()
+        try:
+            await _sweeper_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+    if _pg_store is not None:
+        await _pg_store.close()
     log.info("TrustLayer engine shutting down.")
 
 
@@ -411,7 +461,7 @@ def _outcome_counts(report: IntegrityReport) -> dict[str, int]:
     }
 
 
-def _save_trace(
+async def _save_trace(
     *,
     endpoint: str,
     report: IntegrityReport,
@@ -425,10 +475,10 @@ def _save_trace(
         report=report,
         evidence=list(evidence),
     )
-    _trace_store.save(trace)
+    await _trace_store.save(trace)
 
 
-def _emit_audit_for_report(
+async def _emit_audit_for_report(
     http_request: Request,
     *,
     endpoint: str,
@@ -452,10 +502,10 @@ def _emit_audit_for_report(
         output_tokens=report.metadata.output_tokens,
         estimated_cost_usd=report.metadata.estimated_cost_usd,
     )
-    _audit_log.append(record)
+    await _audit_log.append(record)
 
 
-def _emit_audit_for_batch(
+async def _emit_audit_for_batch(
     http_request: Request,
     *,
     batch_id: str,
@@ -501,7 +551,7 @@ def _emit_audit_for_batch(
     record["error_count"] = rollup.error_count
     record["hallucination_item_count"] = rollup.hallucination_item_count
     record["mode"] = rollup.mode
-    _audit_log.append(record)
+    await _audit_log.append(record)
 
 
 @app.get("/", tags=["meta"])
@@ -652,7 +702,9 @@ async def audit_events(
             },
         )
     capped = min(int(limit), int(settings.audit_max_returned))
-    records = _audit_log.read_tail(limit=capped, since=since_dt, endpoint=endpoint)
+    records = await _audit_log.read_tail(
+        limit=capped, since=since_dt, endpoint=endpoint
+    )
     return AuditEventsResponse(
         count=len(records),
         events=[AuditEvent.model_validate(r) for r in records],
@@ -698,7 +750,7 @@ def _parse_since_param(value: str) -> datetime:
     },
 )
 async def verify_trace(request_id: str) -> VerifyTrace:
-    trace = _trace_store.get(request_id)
+    trace = await _trace_store.get(request_id)
     if trace is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -748,15 +800,15 @@ async def verify(request: VerifyRequest, http_request: Request) -> IntegrityRepo
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
         _stash_usage(http_request, report)
-        _emit_audit_for_report(http_request, endpoint="/verify", report=report)
+        await _emit_audit_for_report(http_request, endpoint="/verify", report=report)
         return report
 
     pipeline = VerifyPipeline()
     report = await pipeline.run(request)
     _cache_put(key, report)
     _stash_usage(http_request, report)
-    _save_trace(endpoint="/verify", report=report, evidence=pipeline.last_evidence)
-    _emit_audit_for_report(http_request, endpoint="/verify", report=report)
+    await _save_trace(endpoint="/verify", report=report, evidence=pipeline.last_evidence)
+    await _emit_audit_for_report(http_request, endpoint="/verify", report=report)
     return report
 
 
@@ -785,15 +837,19 @@ async def verify_quick(
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
         _stash_usage(http_request, report)
-        _emit_audit_for_report(http_request, endpoint="/verify/quick", report=report)
+        await _emit_audit_for_report(
+            http_request, endpoint="/verify/quick", report=report
+        )
         return report
 
     pipeline = VerifyPipeline()
     report = await pipeline.run_quick(request)
     _cache_put(key, report)
     _stash_usage(http_request, report)
-    _save_trace(endpoint="/verify/quick", report=report, evidence=pipeline.last_evidence)
-    _emit_audit_for_report(http_request, endpoint="/verify/quick", report=report)
+    await _save_trace(
+        endpoint="/verify/quick", report=report, evidence=pipeline.last_evidence
+    )
+    await _emit_audit_for_report(http_request, endpoint="/verify/quick", report=report)
     return report
 
 
@@ -837,7 +893,9 @@ async def verify_claims(
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
         _stash_usage(http_request, report)
-        _emit_audit_for_report(http_request, endpoint="/verify/claims", report=report)
+        await _emit_audit_for_report(
+            http_request, endpoint="/verify/claims", report=report
+        )
         return report
 
     pipeline = VerifyPipeline()
@@ -849,8 +907,10 @@ async def verify_claims(
     )
     _cache_put(key, report)
     _stash_usage(http_request, report)
-    _save_trace(endpoint="/verify/claims", report=report, evidence=pipeline.last_evidence)
-    _emit_audit_for_report(http_request, endpoint="/verify/claims", report=report)
+    await _save_trace(
+        endpoint="/verify/claims", report=report, evidence=pipeline.last_evidence
+    )
+    await _emit_audit_for_report(http_request, endpoint="/verify/claims", report=report)
     return report
 
 
@@ -940,7 +1000,7 @@ async def verify_batch(
         "estimated_cost_usd": rollup.estimated_cost_usd,
     }
     batch_id = f"batch_{uuid4().hex[:12]}"
-    _emit_audit_for_batch(
+    await _emit_audit_for_batch(
         http_request,
         batch_id=batch_id,
         rollup=rollup,
@@ -1003,7 +1063,7 @@ async def _process_batch_item(
                     )
                     report = await pipeline.run(req)
                 _cache_put(key, report)
-                _save_trace(
+                await _save_trace(
                     endpoint="/verify/batch",
                     report=report,
                     evidence=pipeline.last_evidence,

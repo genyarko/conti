@@ -135,6 +135,18 @@ class Settings(BaseSettings):
     trace_ttl_seconds: int = Field(default=900, alias="TRACE_TTL_SECONDS")
     trace_max_entries: int = Field(default=256, alias="TRACE_MAX_ENTRIES")
 
+    # --- Postgres-backed audit + trace storage ---
+    # When DATABASE_URL is set the engine swaps the JSONL audit log and
+    # in-memory trace store for Postgres-backed equivalents (durability +
+    # multi-replica consistency). Without it, the file/in-memory backends
+    # are used (the dev/test path).
+    database_url: str = Field(default="", alias="DATABASE_URL")
+    database_pool_min: int = Field(default=1, alias="DATABASE_POOL_MIN")
+    database_pool_max: int = Field(default=5, alias="DATABASE_POOL_MAX")
+    trace_sweeper_interval_seconds: int = Field(
+        default=300, alias="TRACE_SWEEPER_INTERVAL_SECONDS"
+    )
+
     # --- Pipeline thresholds ---
     grounding_threshold_verified: int = Field(
         default=90, alias="GROUNDING_THRESHOLD_VERIFIED"

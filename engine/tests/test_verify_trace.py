@@ -223,7 +223,7 @@ def test_trace_404_when_store_disabled(monkeypatch):
     assert r2.status_code == 404
 
 
-def test_trace_store_ttl_evicts_entries():
+async def test_trace_store_ttl_evicts_entries():
     store = TraceStore(ttl_seconds=60, max_entries=3, enabled=True)
     from engine.app.models.schemas import (
         IntegrityReport,
@@ -241,11 +241,11 @@ def test_trace_store_ttl_evicts_entries():
         )
 
     for i in range(5):
-        store.save(make_trace(f"req_{i}"))
+        await store.save(make_trace(f"req_{i}"))
 
     # Only the 3 most recent should be retained.
-    assert store.get("req_0") is None
-    assert store.get("req_1") is None
-    assert store.get("req_4") is not None
-    assert store.get("req_3") is not None
-    assert store.get("req_2") is not None
+    assert await store.get("req_0") is None
+    assert await store.get("req_1") is None
+    assert await store.get("req_4") is not None
+    assert await store.get("req_3") is not None
+    assert await store.get("req_2") is not None

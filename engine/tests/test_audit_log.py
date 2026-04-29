@@ -248,12 +248,12 @@ def test_audit_events_filters_by_since(monkeypatch, _tmp_audit_log):
     assert body["events"][0]["timestamp"] == cutoff
 
 
-def test_audit_log_rotation_drops_oldest_lines(tmp_path: Path):
+async def test_audit_log_rotation_drops_oldest_lines(tmp_path: Path):
     path = tmp_path / "audit.jsonl"
     # Tiny cap so a handful of appends triggers a rotation.
     audit = AuditLog(path=path, max_bytes=1024, enabled=True)
     for i in range(200):
-        audit.append({"seq": i, "payload": "x" * 50})
+        await audit.append({"seq": i, "payload": "x" * 50})
 
     assert path.stat().st_size <= 1024
     records = [
@@ -267,10 +267,10 @@ def test_audit_log_rotation_drops_oldest_lines(tmp_path: Path):
     assert records[0]["seq"] > 0
 
 
-def test_audit_log_disabled_is_noop(tmp_path: Path):
+async def test_audit_log_disabled_is_noop(tmp_path: Path):
     # Avoid the autouse fixture's audit.jsonl path — use a distinct filename.
     path = tmp_path / "disabled.jsonl"
     audit = AuditLog(path=path, max_bytes=1024, enabled=False)
-    audit.append({"seq": 1})
+    await audit.append({"seq": 1})
     assert not path.exists()
-    assert audit.read_tail(limit=10) == []
+    assert await audit.read_tail(limit=10) == []

@@ -42,7 +42,9 @@ class AuditLog:
     def enabled(self) -> bool:
         return self._enabled
 
-    def append(self, record: dict[str, Any]) -> None:
+    async def append(self, record: dict[str, Any]) -> None:
+        """Append a record. Async to share the interface with PgAuditLog;
+        the JSONL implementation itself is synchronous."""
         if not self._enabled:
             return
         record.setdefault("timestamp", _utc_now_iso())
@@ -57,7 +59,7 @@ class AuditLog:
             except OSError as exc:  # pragma: no cover — disk failure path
                 log.warning("audit log write failed: %s", exc)
 
-    def read_tail(
+    async def read_tail(
         self,
         *,
         limit: int = 100,
@@ -160,7 +162,9 @@ class TraceStore:
     def enabled(self) -> bool:
         return self._enabled
 
-    def save(self, trace: VerifyTrace) -> None:
+    async def save(self, trace: VerifyTrace) -> None:
+        """Save a trace. Async to share the interface with PgTraceStore;
+        the in-memory implementation itself is synchronous."""
         if not self._enabled:
             return
         now = monotonic()
@@ -169,7 +173,7 @@ class TraceStore:
             self._data.move_to_end(trace.request_id)
             self._evict_locked(now)
 
-    def get(self, request_id: str) -> Optional[VerifyTrace]:
+    async def get(self, request_id: str) -> Optional[VerifyTrace]:
         if not self._enabled:
             return None
         now = monotonic()
