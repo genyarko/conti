@@ -106,7 +106,16 @@ class Settings(BaseSettings):
 
     # --- Rate limiting ---
     rate_limit_per_minute: int = Field(default=10, alias="RATE_LIMIT_PER_MINUTE")
+    rate_limit_window_seconds: int = Field(default=60, alias="RATE_LIMIT_WINDOW_SECONDS")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
+
+    # --- Budgeting ---
+    budget_enabled: bool = Field(default=True, alias="BUDGET_ENABLED")
+    default_daily_usd_cap: float = Field(default=10.0, alias="DEFAULT_DAILY_USD_CAP")
+    default_daily_token_cap: int = Field(default=1_000_000, alias="DEFAULT_DAILY_TOKEN_CAP")
+
+    # --- Idempotency ---
+    idempotency_ttl_seconds: int = Field(default=86400, alias="IDEMPOTENCY_TTL_SECONDS")  # 24h
 
     # --- Response cache ---
     cache_enabled: bool = Field(default=True, alias="CACHE_ENABLED")
@@ -142,10 +151,29 @@ class Settings(BaseSettings):
     # are used (the dev/test path).
     database_url: str = Field(default="", alias="DATABASE_URL")
     database_pool_min: int = Field(default=1, alias="DATABASE_POOL_MIN")
-    database_pool_max: int = Field(default=5, alias="DATABASE_POOL_MAX")
+    database_pool_max: int = Field(default=20, alias="DATABASE_POOL_MAX")
     trace_sweeper_interval_seconds: int = Field(
         default=300, alias="TRACE_SWEEPER_INTERVAL_SECONDS"
     )
+
+    # --- Cloudflare R2 Cold Storage ---
+    # Offloads old audit logs from Postgres to R2 as date-partitioned JSONL.
+    r2_account_id: str = Field(default="", alias="R2_ACCOUNT_ID")
+    r2_access_key_id: str = Field(default="", alias="R2_ACCESS_KEY_ID")
+    r2_secret_access_key: str = Field(default="", alias="R2_SECRET_ACCESS_KEY")
+    r2_bucket_name: str = Field(default="trustlayer-audit-vault", alias="R2_BUCKET_NAME")
+    # Rows older than this are eligible for offload.
+    audit_offload_age_days: int = Field(default=30, alias="AUDIT_OFFLOAD_AGE_DAYS")
+    # Frequency of the background check.
+    audit_offload_interval_seconds: int = Field(
+        default=86400, alias="AUDIT_OFFLOAD_INTERVAL_SECONDS"
+    )  # 24h
+
+    # --- Lobster Trap Security Proxy ---
+    # When set, LLM clients (Anthropic, Gemini) route through this proxy
+    # using OpenAI-compatible REST endpoints.
+    lobstertrap_base_url: str = Field(default="", alias="LOBSTERTRAP_BASE_URL")
+    lobstertrap_enabled: bool = Field(default=False, alias="LOBSTERTRAP_ENABLED")
 
     # --- Pipeline thresholds ---
     grounding_threshold_verified: int = Field(

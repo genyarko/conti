@@ -40,6 +40,7 @@ _TYPE_MODIFIERS: dict[ClaimCategory, int] = {
     ClaimCategory.QUANTITATIVE: 100,
     ClaimCategory.INTERPRETIVE: 85,
     ClaimCategory.RECOMMENDATION: 80,
+    ClaimCategory.MISSING_CLAUSE: 100,
 }
 
 

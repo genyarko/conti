@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import time
@@ -13,7 +14,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from engine.app.models.schemas import (
     AdversaryGenerateRequest,
@@ -45,10 +46,17 @@ from engine.app.services.cache import TTLCache, make_cache_key
 from engine.app.services.metrics import MetricsRegistry
 from engine.app.services.postgres import (
     PgAuditLog,
+    PgCache,
+    PgRateLimiter,
     PgTraceStore,
+    PgBudgetStore,
+    PgIdempotencyStore,
     PostgresStore,
-    run_trace_sweeper,
+    run_audit_offloader,
+    run_pg_sweeper,
 )
+from engine.app.services.api_keys import ApiKeyService
+from engine.app.services.r2 import R2Client
 from engine.app.services.rate_limit import SlidingWindowRateLimiter
 from engine.config import settings
 
@@ -59,11 +67,11 @@ logging.basicConfig(
 log = logging.getLogger("trustlayer.engine")
 
 
-_report_cache: TTLCache[dict] = TTLCache(
+_report_cache: "TTLCache[dict] | PgCache" = TTLCache(
     ttl_seconds=settings.cache_ttl_seconds,
     max_entries=settings.cache_max_entries,
 )
-_rate_limiter = SlidingWindowRateLimiter(
+_rate_limiter: "SlidingWindowRateLimiter | PgRateLimiter" = SlidingWindowRateLimiter(
     limit_per_minute=settings.rate_limit_per_minute
 )
 _metrics = MetricsRegistry()
@@ -80,12 +88,18 @@ _trace_store: "TraceStore | PgTraceStore" = TraceStore(
     enabled=settings.trace_enabled,
 )
 _pg_store: Optional[PostgresStore] = None
+_budget_store: Optional[PgBudgetStore] = None
+_idempotency_store: Optional[PgIdempotencyStore] = None
+_api_key_service: ApiKeyService = ApiKeyService(None)
 _sweeper_task: Optional[asyncio.Task] = None
+_offloader_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _audit_log, _trace_store, _pg_store, _sweeper_task
+    global _audit_log, _trace_store, _pg_store, _sweeper_task, _offloader_task
+    global _report_cache, _rate_limiter, _budget_store
+    global _idempotency_store, _api_key_service
 
     log.info(
         "TrustLayer engine starting (env=%s, default=%s/%s)",
@@ -108,13 +122,48 @@ async def lifespan(app: FastAPI):
                 ttl_seconds=settings.trace_ttl_seconds,
                 enabled=settings.trace_enabled,
             )
+            _report_cache = PgCache(
+                _pg_store,
+                ttl_seconds=settings.cache_ttl_seconds,
+            )
+            _rate_limiter = PgRateLimiter(
+                _pg_store,
+                limit_per_minute=settings.rate_limit_per_minute,
+                window_seconds=settings.rate_limit_window_seconds,
+            )
+            _budget_store = PgBudgetStore(_pg_store)
+            _idempotency_store = PgIdempotencyStore(
+                _pg_store, ttl_seconds=settings.idempotency_ttl_seconds
+            )
+            _api_key_service = ApiKeyService(_pg_store)
+
             _sweeper_task = asyncio.create_task(
-                run_trace_sweeper(
+                run_pg_sweeper(
                     _pg_store,
                     interval_seconds=settings.trace_sweeper_interval_seconds,
+                    rate_window_seconds=settings.rate_limit_window_seconds,
                 )
             )
-            log.info("Postgres-backed audit + trace storage active.")
+
+            if settings.r2_account_id:
+                r2 = R2Client(
+                    account_id=settings.r2_account_id,
+                    access_key_id=settings.r2_access_key_id,
+                    secret_access_key=settings.r2_secret_access_key,
+                    bucket_name=settings.r2_bucket_name,
+                )
+                _offloader_task = asyncio.create_task(
+                    run_audit_offloader(
+                        _audit_log,  # type: ignore[arg-type]
+                        r2,
+                        interval_seconds=settings.audit_offload_interval_seconds,
+                        age_days=settings.audit_offload_age_days,
+                    )
+                )
+
+            log.info(
+                "Postgres-backed audit + trace + cache + rate-limit + budget + idempotency active."
+            )
         except Exception as exc:  # noqa: BLE001 — never block startup on DB
             log.exception(
                 "Failed to initialize Postgres storage; falling back to "
@@ -122,6 +171,11 @@ async def lifespan(app: FastAPI):
                 exc,
             )
             _pg_store = None
+
+    # Initialize ApiKeyService even without DB (for legacy token support)
+    if not _pg_store:
+        _api_key_service = ApiKeyService(None)
+
     google_configured = bool(settings.gemini_api_key) or (
         settings.gemini_use_vertex and bool(settings.gemini_project)
     )
@@ -154,8 +208,21 @@ async def lifespan(app: FastAPI):
             await _sweeper_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
+
+    if _offloader_task is not None:
+        _offloader_task.cancel()
+        try:
+            await _offloader_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
     if _pg_store is not None:
         await _pg_store.close()
+
+    # Drain the Lobster Trap proxy connection pool (no-op when never used).
+    from engine.app.services.lobstertrap import aclose_proxy_client
+    await aclose_proxy_client()
+
     log.info("TrustLayer engine shutting down.")
 
 
@@ -177,7 +244,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 def _client_key(request: Request) -> str:
+    state = getattr(request, "state", None)
+    api_key_id = getattr(state, "api_key_id", None) if state is not None else None
+    if api_key_id:
+        return api_key_id
     client_host = request.client.host if request.client else "unknown"
     fwd = request.headers.get("x-forwarded-for")
     if fwd and (
@@ -195,11 +267,48 @@ def _requires_auth(request: Request) -> bool:
     return path.startswith(("/verify", "/audit", "/stats"))
 
 
+def _required_scope(method: str, path: str) -> Optional[str]:
+    """Return the scope required to call this route, or None if the route
+    is unscoped (auth required but no granular gate).
+
+    Scope vocabulary:
+      - verify:write — POST any /verify*
+      - verify:read  — GET  /verify/trace/{request_id}
+      - audit:read   — GET  /audit/events
+      - stats:read   — GET  /stats
+      - "*"          — wildcard, grants any scope
+    """
+    method = method.upper()
+    if path == "/stats" and method == "GET":
+        return "stats:read"
+    if path == "/audit/events" and method == "GET":
+        return "audit:read"
+    if path.startswith("/verify/trace/") and method == "GET":
+        return "verify:read"
+    if path.startswith("/verify") and method == "POST":
+        return "verify:write"
+    return None
+
+
 def _unauthorized(message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_401_UNAUTHORIZED,
         content={"error": "unauthorized", "message": message},
         headers={"WWW-Authenticate": 'Bearer realm="trustlayer"'},
+    )
+
+
+def _forbidden_scope(required: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        content={
+            "error": "forbidden_scope",
+            "message": (
+                f"This API key is not authorized for {required!r}. "
+                "Update the key's scopes to grant access."
+            ),
+            "required_scope": required,
+        },
     )
 
 
@@ -264,14 +373,193 @@ async def catch_unhandled_errors(request: Request, call_next):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if settings.api_auth_token and _requires_auth(request):
+    if _requires_auth(request):
         header = request.headers.get("authorization") or ""
-        scheme, _, presented = header.partition(" ")
-        if scheme.lower() != "bearer" or not presented:
+        scheme, _, bearer = header.partition(" ")
+        if scheme.lower() != "bearer" or not bearer:
+            # If API_AUTH_TOKEN is empty, we allow unauthenticated access in dev.
+            if not settings.api_auth_token:
+                request.state.api_key_id = "default"
+                request.state.api_scopes = None
+                return await call_next(request)
             return _unauthorized("Missing Bearer token.")
-        if not hmac.compare_digest(presented.strip(), settings.api_auth_token):
+
+        key = await _api_key_service.resolve(bearer.strip())
+        if not key:
             return _unauthorized("Invalid API token.")
+
+        request.state.api_key_id = key.id
+        request.state.api_scopes = key.scopes
+
+        required = _required_scope(request.method, request.url.path)
+        if required is not None and not key.has_scope(required):
+            return _forbidden_scope(required)
+    else:
+        # Public endpoints don't strictly need a key_id, but stashing 'default'
+        # ensures downstream metrics/limiter logic doesn't crash.
+        request.state.api_key_id = "default"
+        request.state.api_scopes = None
+
     return await call_next(request)
+
+
+@app.middleware("http")
+async def idempotency_middleware(request: Request, call_next):
+    if (
+        not _pg_store
+        or request.method != "POST"
+        or not request.url.path.startswith("/verify")
+    ):
+        return await call_next(request)
+
+    idempotency_key = request.headers.get("idempotency-key")
+    if not idempotency_key:
+        return await call_next(request)
+
+    api_key_id = getattr(request.state, "api_key_id", "default")
+
+    # Read body to compute hash.
+    body = await request.body()
+    try:
+        import json as _json
+        data = _json.loads(body)
+        canonical = _json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+        request_hash = hashlib.sha256(canonical).digest()
+    except Exception:  # noqa: BLE001
+        request_hash = hashlib.sha256(body).digest()
+
+    # Re-supply body for downstream.
+    async def receive():
+        return {"type": "http.request", "body": body}
+    request._receive = receive
+
+    # 1. Check existing.
+    existing = await _idempotency_store.get(api_key_id, idempotency_key)
+    if existing:
+        if existing["request_hash"] != request_hash:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={
+                    "error": "idempotency_key_reuse",
+                    "message": "Idempotency key reused with a different request body.",
+                },
+            )
+
+        status_code = existing["status_code"]
+        if status_code is None:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "error": "ident_request_in_progress",
+                    "message": "A request with this idempotency key is already in progress.",
+                },
+            )
+
+        # Replay.
+        return JSONResponse(
+            status_code=status_code,
+            content=existing["body"],
+            headers={"Idempotent-Replayed": "true"},
+        )
+
+    # 2. Insert in-flight.
+    created = await _idempotency_store.create_in_flight(
+        api_key_id, idempotency_key, request_hash
+    )
+    if not created:
+        # Race condition.
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "error": "idempotent_request_in_progress",
+                "message": "A request with this idempotency key is already in progress.",
+            },
+        )
+
+    try:
+        response: Response = await call_next(request)
+
+        if 200 <= response.status_code < 500:
+            # We need the response body to save it.
+            # Note: StreamingResponse would be harder to handle here.
+            # Most of our responses are JSONResponse.
+            if hasattr(response, "body"):
+                try:
+                    import json as _json
+                    resp_body = _json.loads(response.body)
+                    await _idempotency_store.save_resolved(
+                        api_key_id, idempotency_key, response.status_code, resp_body
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        elif response.status_code >= 500:
+            # Delete so client can retry.
+            await _idempotency_store.delete(api_key_id, idempotency_key)
+
+        return response
+    except Exception:
+        # On crash, delete so client can retry.
+        await _idempotency_store.delete(api_key_id, idempotency_key)
+        raise
+
+
+@app.middleware("http")
+async def budget_middleware(request: Request, call_next):
+    if (
+        not settings.budget_enabled
+        or not _pg_store
+        or request.method != "POST"
+        or not request.url.path.startswith("/verify")
+    ):
+        return await call_next(request)
+
+    api_key_id = getattr(request.state, "api_key_id", "default")
+
+    # 1. Get caps.
+    key_meta = await _api_key_service._get_metadata(api_key_id)
+    usd_cap = key_meta.daily_usd_cap if key_meta else settings.default_daily_usd_cap
+    token_cap = key_meta.daily_token_cap if key_meta else settings.default_daily_token_cap
+
+    if usd_cap is None and token_cap is None:
+        return await call_next(request)
+
+    # 2. Get usage.
+    usd_spent, tokens_spent = await _budget_store.get_usage(api_key_id)
+
+    # 3. Check.
+    over_usd = usd_cap is not None and usd_spent >= usd_cap
+    over_tokens = token_cap is not None and tokens_spent >= token_cap
+
+    if over_usd or over_tokens:
+        reset_seconds = 3600  # Coarse reset estimate: next hour.
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "error": "budget_exceeded",
+                "message": (
+                    f"Daily budget of {usd_cap} USD / {token_cap} tokens exceeded."
+                ),
+            },
+            headers={
+                "Retry-After": str(reset_seconds),
+                "X-Budget-USD-Limit": str(usd_cap or "unlimited"),
+                "X-Budget-USD-Remaining": "0",
+                "X-Budget-Tokens-Limit": str(token_cap or "unlimited"),
+                "X-Budget-Tokens-Remaining": "0",
+            },
+        )
+
+    response = await call_next(request)
+
+    # Add budget headers to successful response.
+    if usd_cap:
+        response.headers["X-Budget-USD-Limit"] = str(usd_cap)
+        response.headers["X-Budget-USD-Remaining"] = str(max(0.0, usd_cap - usd_spent))
+    if token_cap:
+        response.headers["X-Budget-Tokens-Limit"] = str(token_cap)
+        response.headers["X-Budget-Tokens-Remaining"] = str(max(0, token_cap - tokens_spent))
+
+    return response
 
 
 _METRICS_RECORDED_PATHS = ("/verify",)
@@ -286,7 +574,7 @@ async def timing_and_rate_limit_middleware(request: Request, call_next):
         and request.method == "POST"
         and request.url.path.startswith("/verify")
     ):
-        allowed, remaining, retry_after = _rate_limiter.check(_client_key(request))
+        allowed, remaining, retry_after = await _rate_limiter.check(_client_key(request))
         if not allowed:
             _record_metrics(request, start_perf=start, status_code=429, usage=None)
             return JSONResponse(
@@ -423,15 +711,15 @@ def _enforce_claim_count(n: int) -> None:
         )
 
 
-def _cached_or_run(key: str):
+async def _cached_or_run(key: str):
     if not settings.cache_enabled:
         return None
-    return _report_cache.get(key)
+    return await _report_cache.get(key)
 
 
-def _cache_put(key: str, report: IntegrityReport) -> None:
+async def _cache_put(key: str, report: IntegrityReport) -> None:
     if settings.cache_enabled:
-        _report_cache.set(key, report.model_dump(mode="json"))
+        await _report_cache.set(key, report.model_dump(mode="json"))
 
 
 def _resolved_cache_parts(provider: Optional[str], model: Optional[str]) -> tuple[str, str]:
@@ -466,6 +754,7 @@ async def _save_trace(
     endpoint: str,
     report: IntegrityReport,
     evidence: list[TraceClaimEvidence],
+    api_key_id: Optional[str] = None,
 ) -> None:
     if not _trace_store.enabled:
         return
@@ -475,7 +764,7 @@ async def _save_trace(
         report=report,
         evidence=list(evidence),
     )
-    await _trace_store.save(trace)
+    await _trace_store.save(trace, api_key_id=api_key_id)
 
 
 async def _emit_audit_for_report(
@@ -489,8 +778,10 @@ async def _emit_audit_for_report(
     http_request.state.request_id = report.metadata.request_id
     if not _audit_log.enabled:
         return
+    api_key_id = getattr(http_request.state, "api_key_id", "default")
     record = build_verify_record(
         request_id=report.metadata.request_id,
+        api_key_id=api_key_id,
         endpoint=endpoint,
         model=report.metadata.model,
         status_code=200,
@@ -501,6 +792,11 @@ async def _emit_audit_for_report(
         input_tokens=report.metadata.input_tokens,
         output_tokens=report.metadata.output_tokens,
         estimated_cost_usd=report.metadata.estimated_cost_usd,
+        security_risk_score=report.metadata.security_risk_score,
+        security_intent_detected=report.metadata.security_intent_detected,
+        security_intent_declared=report.metadata.security_intent_declared,
+        security_action=report.metadata.security_action,
+        security_intent_mismatch=report.metadata.security_intent_mismatch,
     )
     await _audit_log.append(record)
 
@@ -518,6 +814,7 @@ async def _emit_audit_for_batch(
     http_request.state.request_id = batch_id
     if not _audit_log.enabled:
         return
+    api_key_id = getattr(http_request.state, "api_key_id", "default")
     outcome_counts = {"verified": 0, "uncertain": 0, "flagged": 0, "hallucinations": 0}
     claim_count = 0
     for item in results:
@@ -529,12 +826,30 @@ async def _emit_audit_for_batch(
     # Pull the resolved model from the first OK report so the audit row
     # records what actually ran, not whatever ANTHROPIC_MODEL was set to.
     batch_model = settings.default_model
+    security_risk_score: Optional[str] = None
+    security_intent_mismatch = False
+    security_action: Optional[str] = None
+    risk_rank = {"Low": 1, "Medium": 2, "High": 3}
+
     for item in results:
-        if item.report is not None:
+        if item.report is None:
+            continue
+        if batch_model == settings.default_model:
             batch_model = item.report.metadata.model
-            break
+        meta = item.report.metadata
+        if meta.security_risk_score and (
+            risk_rank.get(meta.security_risk_score, 0)
+            > risk_rank.get(security_risk_score or "", 0)
+        ):
+            security_risk_score = meta.security_risk_score
+        if meta.security_intent_mismatch:
+            security_intent_mismatch = True
+        if meta.security_action and not security_action:
+            security_action = meta.security_action
+
     record = build_verify_record(
         request_id=batch_id,
+        api_key_id=api_key_id,
         endpoint="/verify/batch",
         model=batch_model,
         status_code=200,
@@ -545,6 +860,9 @@ async def _emit_audit_for_batch(
         input_tokens=rollup.total_input_tokens,
         output_tokens=rollup.total_output_tokens,
         estimated_cost_usd=rollup.estimated_cost_usd,
+        security_risk_score=security_risk_score,
+        security_intent_mismatch=security_intent_mismatch,
+        security_action=security_action,
     )
     record["item_count"] = rollup.item_count
     record["ok_count"] = rollup.ok_count
@@ -594,7 +912,7 @@ async def health() -> dict:
         },
         "cache": {
             "enabled": settings.cache_enabled,
-            "size": len(_report_cache),
+            "size": await _report_cache.get_size(),
             "hits": _report_cache.hits,
             "misses": _report_cache.misses,
         },
@@ -643,7 +961,7 @@ async def stats() -> dict:
         "default_model": settings.default_model,
         "cache": {
             "enabled": settings.cache_enabled,
-            "size": len(_report_cache),
+            "size": await _report_cache.get_size(),
             "hits": total_hits,
             "misses": total_misses,
             "hit_rate": (total_hits / lookups) if lookups else 0.0,
@@ -674,6 +992,7 @@ _AUDIT_ALLOWED_ENDPOINTS = {
     ),
 )
 async def audit_events(
+    http_request: Request,
     since: Optional[str] = Query(
         default=None,
         description="ISO-8601 timestamp; only records with `timestamp >= since` are returned.",
@@ -702,8 +1021,9 @@ async def audit_events(
             },
         )
     capped = min(int(limit), int(settings.audit_max_returned))
+    api_key_id = getattr(http_request.state, "api_key_id", None)
     records = await _audit_log.read_tail(
-        limit=capped, since=since_dt, endpoint=endpoint
+        limit=capped, since=since_dt, endpoint=endpoint, api_key_id=api_key_id
     )
     return AuditEventsResponse(
         count=len(records),
@@ -749,9 +1069,12 @@ def _parse_since_param(value: str) -> datetime:
         404: {"description": "Trace not found or expired."},
     },
 )
-async def verify_trace(request_id: str) -> VerifyTrace:
-    trace = await _trace_store.get(request_id)
+async def verify_trace(request_id: str, http_request: Request) -> VerifyTrace:
+    api_key_id = getattr(http_request.state, "api_key_id", None)
+    trace = await _trace_store.get(request_id, api_key_id=api_key_id)
     if trace is None:
+        # Mismatched-tenant lookups also land here so we don't disclose that
+        # the request_id exists for some other key.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -796,7 +1119,7 @@ async def verify(request: VerifyRequest, http_request: Request) -> IntegrityRepo
     key = make_cache_key(
         "full", provider, model, request.source_context, request.llm_output
     )
-    cached = _cached_or_run(key)
+    cached = await _cached_or_run(key)
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
         _stash_usage(http_request, report)
@@ -805,9 +1128,14 @@ async def verify(request: VerifyRequest, http_request: Request) -> IntegrityRepo
 
     pipeline = VerifyPipeline()
     report = await pipeline.run(request)
-    _cache_put(key, report)
+    await _cache_put(key, report)
     _stash_usage(http_request, report)
-    await _save_trace(endpoint="/verify", report=report, evidence=pipeline.last_evidence)
+    await _save_trace(
+        endpoint="/verify",
+        report=report,
+        evidence=pipeline.last_evidence,
+        api_key_id=getattr(http_request.state, "api_key_id", None),
+    )
     await _emit_audit_for_report(http_request, endpoint="/verify", report=report)
     return report
 
@@ -833,7 +1161,7 @@ async def verify_quick(
     key = make_cache_key(
         "quick", provider, model, request.source_context, request.llm_output
     )
-    cached = _cached_or_run(key)
+    cached = await _cached_or_run(key)
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
         _stash_usage(http_request, report)
@@ -844,10 +1172,13 @@ async def verify_quick(
 
     pipeline = VerifyPipeline()
     report = await pipeline.run_quick(request)
-    _cache_put(key, report)
+    await _cache_put(key, report)
     _stash_usage(http_request, report)
     await _save_trace(
-        endpoint="/verify/quick", report=report, evidence=pipeline.last_evidence
+        endpoint="/verify/quick",
+        report=report,
+        evidence=pipeline.last_evidence,
+        api_key_id=getattr(http_request.state, "api_key_id", None),
     )
     await _emit_audit_for_report(http_request, endpoint="/verify/quick", report=report)
     return report
@@ -889,7 +1220,7 @@ async def verify_claims(
         request.source_context,
         "\n".join(f"{c.id}::{c.category.value}::{c.text}" for c in claims),
     )
-    cached = _cached_or_run(key)
+    cached = await _cached_or_run(key)
     if cached is not None:
         report = IntegrityReport.model_validate(cached)
         _stash_usage(http_request, report)
@@ -905,10 +1236,13 @@ async def verify_claims(
         provider=request.provider,
         model=request.model,
     )
-    _cache_put(key, report)
+    await _cache_put(key, report)
     _stash_usage(http_request, report)
     await _save_trace(
-        endpoint="/verify/claims", report=report, evidence=pipeline.last_evidence
+        endpoint="/verify/claims",
+        report=report,
+        evidence=pipeline.last_evidence,
+        api_key_id=getattr(http_request.state, "api_key_id", None),
     )
     await _emit_audit_for_report(http_request, endpoint="/verify/claims", report=report)
     return report
@@ -976,6 +1310,7 @@ async def verify_batch(
     mode = request.mode
 
     t0 = time.perf_counter()
+    api_key_id = getattr(http_request.state, "api_key_id", None)
     results = await asyncio.gather(
         *(
             _process_batch_item(
@@ -985,6 +1320,7 @@ async def verify_batch(
                 semaphore,
                 provider=request.provider,
                 model=request.model,
+                api_key_id=api_key_id,
             )
             for idx, item in enumerate(request.items)
         )
@@ -1030,6 +1366,7 @@ async def _process_batch_item(
     *,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    api_key_id: Optional[str] = None,
 ) -> BatchItemResult:
     async with semaphore:
         try:
@@ -1041,7 +1378,7 @@ async def _process_batch_item(
                 item.source_context,
                 item.llm_output,
             )
-            cached = _cached_or_run(key)
+            cached = await _cached_or_run(key)
             if cached is not None:
                 report = IntegrityReport.model_validate(cached)
             else:
@@ -1062,11 +1399,12 @@ async def _process_batch_item(
                         model=model,
                     )
                     report = await pipeline.run(req)
-                _cache_put(key, report)
+                await _cache_put(key, report)
                 await _save_trace(
                     endpoint="/verify/batch",
                     report=report,
                     evidence=pipeline.last_evidence,
+                    api_key_id=api_key_id,
                 )
             return BatchItemResult(index=index, status="ok", report=report)
         except Exception as exc:  # noqa: BLE001 — isolate per-item failures.
@@ -1129,19 +1467,21 @@ async def adversary_generate(
         model=request.model,
         ledger=ledger,
     )
-    
-    t0 = time.perf_counter()
-    output = await agent.generate_adversarial_summary(request.source_context)
-    duration_ms = int((time.perf_counter() - t0) * 1000)
-    
+
     from engine.app.services import llm_factory
     resolved = llm_factory.resolve(provider=request.provider, model=request.model)
-    
+
     metadata = ReportMetadata(
         provider=resolved.provider,
         model=resolved.model,
-        duration_ms=duration_ms,
     )
+    request_id = metadata.request_id
+
+    t0 = time.perf_counter()
+    output = await agent.generate_adversarial_summary(request.source_context, request_id=request_id)
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+
+    metadata.duration_ms = duration_ms
     from engine.app.services.pricing import estimate_cost_usd
     metadata.input_tokens = ledger.usage.input_tokens
     metadata.output_tokens = ledger.usage.output_tokens
@@ -1151,13 +1491,14 @@ async def adversary_generate(
             metadata.model,
             ledger.usage.input_tokens,
             ledger.usage.output_tokens,
+            cache_read_tokens=ledger.usage.cache_read_input_tokens,
         ),
         6,
     )
-    
-    # We don't audit adversary calls by default to keep the audit log focused 
+
+    # We don't audit adversary calls by default to keep the audit log focused
     # on verification results, but we could if needed.
-    
+
     return AdversaryGenerateResponse(
         summary=output.summary,
         injections=[

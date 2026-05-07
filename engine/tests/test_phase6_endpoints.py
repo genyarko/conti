@@ -63,16 +63,16 @@ def _install_pipeline(monkeypatch, *, extractor=None, grounder=None, consistency
     monkeypatch.setattr(main_module, "VerifyPipeline", _factory)
 
 
-def _clear_cache_and_rate_limits():
-    main_module._report_cache.clear()
-    main_module._rate_limiter.reset()
+async def _clear_cache_and_rate_limits():
+    await main_module._report_cache.clear()
+    await main_module._rate_limiter.reset()
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
-    _clear_cache_and_rate_limits()
+async def _reset_state():
+    await _clear_cache_and_rate_limits()
     yield
-    _clear_cache_and_rate_limits()
+    await _clear_cache_and_rate_limits()
 
 
 def _grounded(cid: str, score: int = 95) -> GroundingResult:
@@ -214,7 +214,7 @@ def test_verify_quick_cache_hit_avoids_pipeline(monkeypatch):
 # ---------- rate limiting ----------
 
 
-def test_rate_limit_returns_429(monkeypatch):
+async def test_rate_limit_returns_429(monkeypatch):
     _install_pipeline(
         monkeypatch,
         extractor=_StubExtractor(claims=[]),
@@ -223,7 +223,7 @@ def test_rate_limit_returns_429(monkeypatch):
     )
     monkeypatch.setattr(main_module.settings, "rate_limit_per_minute", 2)
     monkeypatch.setattr(main_module._rate_limiter, "_limit", 2)
-    _clear_cache_and_rate_limits()
+    await _clear_cache_and_rate_limits()
 
     # Vary payloads so we don't hit the response cache.
     for i in range(2):

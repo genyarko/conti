@@ -30,6 +30,7 @@ class _UsageReportingClient:
     per_call_usage: TokenUsage
     calls: list[dict] = field(default_factory=list)
     last_usage: TokenUsage = field(default_factory=TokenUsage)
+    security_events: list[dict] = field(default_factory=list)
     _idx: int = 0
 
     async def create_message(
@@ -40,6 +41,7 @@ class _UsageReportingClient:
         model: str,
         max_tokens: int,
         response_schema: dict | None = None,
+        lobstertrap_metadata: dict | None = None,
     ) -> str:
         self.calls.append(
             {
@@ -48,6 +50,7 @@ class _UsageReportingClient:
                 "model": model,
                 "max_tokens": max_tokens,
                 "response_schema": response_schema,
+                "lobstertrap_metadata": lobstertrap_metadata,
             }
         )
         if self._idx >= len(self.responses):

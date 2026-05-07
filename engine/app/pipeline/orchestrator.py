@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from engine.app.models.schemas import (
     Claim,
@@ -40,6 +40,7 @@ class VerifyPipeline:
         ledger: Optional[TokenLedger] = None,
         *,
         resolved: Optional[llm_factory.Resolved] = None,
+        request_id: Optional[str] = None,
     ) -> tuple[
         ClaimExtractor, ClaimGrounder, ConsistencyChecker, ReportAggregator
     ]:
@@ -62,31 +63,41 @@ class VerifyPipeline:
         if extractor is None:
             if resolved is not None:
                 extractor = ClaimExtractor(
-                    client=client, model=resolved.fast_model, ledger=ledger
+                    client=client, 
+                    model=resolved.fast_model, 
+                    ledger=ledger,
+                    request_id=request_id,
                 )
             else:
-                extractor = ClaimExtractor(ledger=ledger)
+                extractor = ClaimExtractor(ledger=ledger, request_id=request_id)
         elif (
             ledger is not None
             and hasattr(extractor, "_ledger")
             and extractor._ledger is None
         ):
             extractor._ledger = ledger
+        if request_id and hasattr(extractor, "_request_id") and extractor._request_id is None:
+            extractor._request_id = request_id
 
         grounder = self.grounder
         if grounder is None:
             if resolved is not None:
                 grounder = ClaimGrounder(
-                    client=client, model=resolved.fast_model, ledger=ledger
+                    client=client, 
+                    model=resolved.fast_model, 
+                    ledger=ledger,
+                    request_id=request_id,
                 )
             else:
-                grounder = ClaimGrounder(ledger=ledger)
+                grounder = ClaimGrounder(ledger=ledger, request_id=request_id)
         elif (
             ledger is not None
             and hasattr(grounder, "_ledger")
             and grounder._ledger is None
         ):
             grounder._ledger = ledger
+        if request_id and hasattr(grounder, "_request_id") and grounder._request_id is None:
+            grounder._request_id = request_id
 
         consistency = self.consistency
         if consistency is None:
@@ -96,15 +107,18 @@ class VerifyPipeline:
                     model=resolved.model,
                     fast_model=resolved.fast_model,
                     ledger=ledger,
+                    request_id=request_id,
                 )
             else:
-                consistency = ConsistencyChecker(ledger=ledger)
+                consistency = ConsistencyChecker(ledger=ledger, request_id=request_id)
         elif (
             ledger is not None
             and hasattr(consistency, "_ledger")
             and consistency._ledger is None
         ):
             consistency._ledger = ledger
+        if request_id and hasattr(consistency, "_request_id") and consistency._request_id is None:
+            consistency._request_id = request_id
 
         return (
             extractor,
@@ -118,17 +132,20 @@ class VerifyPipeline:
     ) -> llm_factory.Resolved:
         return llm_factory.resolve(provider=provider, model=model)
 
-    def _new_metadata(self, resolved: llm_factory.Resolved) -> ReportMetadata:
+    def _new_metadata(self, resolved: llm_factory.Resolved, request_id: Optional[str] = None) -> ReportMetadata:
         # Stamp the metadata with the *resolved* provider+model that actually
         # ran — fixing the prior bug where metadata.model said "Opus" while
         # Haiku did the work. `fast_model` exposes the cheaper tier most calls
         # actually hit (extractor, grounder, source-consistency); `model` is
         # the flagship reserved for contradiction detection.
-        return ReportMetadata(
-            provider=resolved.provider,
-            model=resolved.model,
-            fast_model=resolved.fast_model,
-        )
+        kwargs: dict[str, Any] = {
+            "provider": resolved.provider,
+            "model": resolved.model,
+            "fast_model": resolved.fast_model,
+        }
+        if request_id:
+            kwargs["request_id"] = request_id
+        return ReportMetadata(**kwargs)
 
     def _apply_usage(
         self, metadata: ReportMetadata, ledger: TokenLedger
@@ -141,17 +158,78 @@ class VerifyPipeline:
                 metadata.model,
                 ledger.usage.input_tokens,
                 ledger.usage.output_tokens,
+                cache_read_tokens=ledger.usage.cache_read_input_tokens,
             ),
             6,
         )
 
-    async def run(self, request: VerifyRequest) -> IntegrityReport:
+    def _apply_security(
+        self, metadata: ReportMetadata, clients: list[Optional[llm_factory.LLMClient]]
+    ) -> None:
+        """Aggregate Lobster Trap signals across every LLM call in the run.
+
+        Each client carries a list of per-call events (one per `create_message`
+        routed through the proxy). We escalate `risk_score` to the highest tier
+        seen, OR-reduce `intent_mismatch`, and surface a representative event's
+        labels — preferring a mismatched event since that's the more
+        informative thing for an auditor to see.
+        """
+        risk_rank = {"Low": 1, "Medium": 2, "High": 3}
+        # Action severity ranks the policy outcomes Lobster Trap can emit.
+        # The audit row should show the most-impactful action, not whichever
+        # one happened to land on the most-informative event.
+        action_rank = {
+            "ALLOW": 0, "LOG": 1, "RATE_LIMIT": 2,
+            "HUMAN_REVIEW": 3, "QUARANTINE": 4, "DENY": 5,
+        }
+        events: list[dict[str, Any]] = []
+        for client in clients:
+            if not client:
+                continue
+            events.extend(getattr(client, "security_events", None) or [])
+
+        if not events:
+            return
+
+        for ev in events:
+            rs = ev.get("risk_score")
+            if rs and risk_rank.get(rs, 0) > risk_rank.get(metadata.security_risk_score or "", 0):
+                metadata.security_risk_score = rs
+            action = (ev.get("action") or "").upper() or None
+            if action and action_rank.get(action, 0) > action_rank.get(
+                (metadata.security_action or "").upper(), 0
+            ):
+                metadata.security_action = action
+
+        metadata.security_intent_mismatch = any(ev.get("intent_mismatch") for ev in events)
+
+        # For the surfaced declared/detected labels, prefer a mismatched event
+        # — that's the row an auditor cares about. Fall back to the first
+        # event that carries any labels.
+        representative = next(
+            (ev for ev in events if ev.get("intent_mismatch")),
+            next(
+                (ev for ev in events if ev.get("intent_detected") or ev.get("intent_declared")),
+                None,
+            ),
+        )
+        if representative is not None:
+            metadata.security_intent_detected = (
+                representative.get("intent_detected") or metadata.security_intent_detected
+            )
+            metadata.security_intent_declared = (
+                representative.get("intent_declared") or metadata.security_intent_declared
+            )
+
+    async def run(self, request: VerifyRequest, request_id: Optional[str] = None) -> IntegrityReport:
         ledger = TokenLedger()
         resolved = self._resolve(request.provider, request.model)
+        metadata = self._new_metadata(resolved, request_id=request_id)
+        request_id = metadata.request_id
+
         extractor, grounder, consistency, aggregator = self._components(
-            ledger, resolved=resolved
+            ledger, resolved=resolved, request_id=request_id
         )
-        metadata = self._new_metadata(resolved)
         self.last_evidence = []
 
         t0 = time.perf_counter()
@@ -188,6 +266,7 @@ class VerifyPipeline:
         metadata.consistency_ms = span_ms
 
         self._apply_usage(metadata, ledger)
+        self._apply_security(metadata, _stage_clients(extractor, grounder, consistency))
         report = aggregator.aggregate(
             claims=claims,
             groundings=groundings,
@@ -198,7 +277,7 @@ class VerifyPipeline:
         self.last_evidence = _build_evidence(claims, groundings, consistencies)
         return report
 
-    async def run_quick(self, request: VerifyRequest) -> IntegrityReport:
+    async def run_quick(self, request: VerifyRequest, request_id: Optional[str] = None) -> IntegrityReport:
         """Grounding-only fast path: skip the consistency LLM stage.
 
         Each claim receives a neutral `CONSISTENT` verdict so the aggregator's
@@ -207,10 +286,12 @@ class VerifyPipeline:
         """
         ledger = TokenLedger()
         resolved = self._resolve(request.provider, request.model)
+        metadata = self._new_metadata(resolved, request_id=request_id)
+        request_id = metadata.request_id
+        
         extractor, grounder, _consistency, aggregator = self._components(
-            ledger, resolved=resolved
+            ledger, resolved=resolved, request_id=request_id
         )
-        metadata = self._new_metadata(resolved)
         # Quick mode runs only on the fast tier — record that, not the flagship.
         metadata.model = resolved.fast_model
         self.last_evidence = []
@@ -234,6 +315,7 @@ class VerifyPipeline:
 
         consistencies = [_skipped_consistency(c.id) for c in claims]
         self._apply_usage(metadata, ledger)
+        self._apply_security(metadata, _stage_clients(extractor, grounder))
         report = aggregator.aggregate(
             claims=claims,
             groundings=groundings,
@@ -251,14 +333,17 @@ class VerifyPipeline:
         *,
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> IntegrityReport:
         """Skip extraction and verify caller-supplied claims directly."""
         ledger = TokenLedger()
         resolved = self._resolve(provider, model)
+        metadata = self._new_metadata(resolved, request_id=request_id)
+        request_id = metadata.request_id
+
         _extractor, grounder, consistency, aggregator = self._components(
-            ledger, resolved=resolved
+            ledger, resolved=resolved, request_id=request_id
         )
-        metadata = self._new_metadata(resolved)
         metadata.extractor_ms = 0
         self.last_evidence = []
 
@@ -285,6 +370,7 @@ class VerifyPipeline:
         metadata.consistency_ms = span_ms
 
         self._apply_usage(metadata, ledger)
+        self._apply_security(metadata, _stage_clients(grounder, consistency))
         report = aggregator.aggregate(
             claims=claims,
             groundings=groundings,
@@ -294,6 +380,13 @@ class VerifyPipeline:
         report.metadata.duration_ms = int((time.perf_counter() - t0) * 1000)
         self.last_evidence = _build_evidence(claims, groundings, consistencies)
         return report
+
+
+def _stage_clients(*stages: Any) -> list[Optional[llm_factory.LLMClient]]:
+    """Return each stage's LLM client, or None for stages (e.g. test stubs)
+    that don't expose one. Keeps `_apply_security` defensive at the boundary
+    so we don't AttributeError on stages that don't follow the convention."""
+    return [getattr(stage, "_client", None) for stage in stages]
 
 
 def _build_evidence(

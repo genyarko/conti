@@ -80,6 +80,7 @@ class GeminiClient:
     credentials_json: str = ""
     _client: Any = None
     last_usage: TokenUsage = field(default_factory=TokenUsage)
+    security_events: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         genai, _ = _import_genai()
@@ -115,6 +116,7 @@ class GeminiClient:
         max_tokens: int,
         response_schema: Optional[dict[str, Any]] = None,
         image_parts: Optional[list[tuple[bytes, str]]] = None,
+        lobstertrap_metadata: Optional[dict[str, Any]] = None,
     ) -> str:
         """Generate a text response. Returns the raw model output as a string.
 
@@ -123,6 +125,19 @@ class GeminiClient:
         `image_parts` is provided, each image is sent as an inline_data Part
         before the user text — used by the multimodal contract analyzer.
         """
+        from engine.config import settings
+        if settings.lobstertrap_enabled and settings.lobstertrap_base_url:
+            if image_parts:
+                log.warning("Gemini multimodal input is not supported through Lobster Trap proxy.")
+            return await self._create_message_lobstertrap(
+                system=system,
+                user=user,
+                model=model,
+                max_tokens=max_tokens,
+                response_schema=response_schema,
+                lobstertrap_metadata=lobstertrap_metadata,
+            )
+
         assert self._client is not None
         _, genai_types = _import_genai()
         contents = self._build_contents(user, image_parts, genai_types)
@@ -194,6 +209,7 @@ class GeminiClient:
         tool_description: str,
         input_schema: dict[str, Any],
         image_parts: Optional[list[tuple[bytes, str]]] = None,
+        lobstertrap_metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Force the model to call a single function and return its parsed args.
 
@@ -202,6 +218,21 @@ class GeminiClient:
         smart quotes from plain-text JSON output. Equivalent to Anthropic's
         `tool_choice={"type":"tool","name":...}`.
         """
+        from engine.config import settings
+        if settings.lobstertrap_enabled and settings.lobstertrap_base_url:
+            # Fall back to structured output via create_message since tool-call
+            # proxying is more complex in OpenAI format.
+            log.info("Gemini tool call falling back to structured output through Lobster Trap.")
+            resp = await self.create_message(
+                system=system,
+                user=user,
+                model=model,
+                max_tokens=max_tokens,
+                response_schema=input_schema,
+                lobstertrap_metadata=lobstertrap_metadata,
+            )
+            return json.loads(resp)
+
         assert self._client is not None
         _, genai_types = _import_genai()
         contents = self._build_contents(user, image_parts, genai_types)
@@ -264,6 +295,56 @@ class GeminiClient:
         self._record_usage(resp)
         self._reject_truncated(resp, max_tokens)
         return self._extract_function_args(resp, tool_name)
+
+    async def _create_message_lobstertrap(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str,
+        max_tokens: int,
+        response_schema: Optional[dict[str, Any]] = None,
+        lobstertrap_metadata: Optional[dict[str, Any]] = None,
+    ) -> str:
+        # Lazy import: avoids a circular at module load and keeps the proxy
+        # path optional for deployments that don't enable Lobster Trap.
+        from engine.app.services.lobstertrap import (
+            ProxyAuthError,
+            proxy_chat_completion,
+        )
+
+        if self.use_vertex:
+            # Vertex auth is gRPC + service-account, not bearer-token. Bail
+            # early with a clear message instead of sending `Authorization:
+            # Bearer ` (empty) and getting an opaque 401.
+            raise ProxyAuthError(
+                "Lobster Trap proxy is not supported with GEMINI_USE_VERTEX=true. "
+                "Either set GEMINI_API_KEY (AI Studio mode) or disable "
+                "LOBSTERTRAP_ENABLED."
+            )
+
+        response_format: Optional[dict[str, Any]] = None
+        if response_schema:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": response_schema,
+                },
+            }
+
+        content, usage, event = await proxy_chat_completion(
+            api_key=self.api_key,
+            model=model,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            lobstertrap_metadata=lobstertrap_metadata,
+        )
+        self.last_usage = usage
+        self.security_events.append(event)
+        return content
 
     @staticmethod
     def _build_contents(

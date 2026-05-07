@@ -9,12 +9,14 @@ from typing import Any, Optional
 
 from rapidfuzz import fuzz
 
-from engine.app.models.schemas import Claim, GroundingLevel
+from engine.app.models.schemas import Claim, ClaimCategory, GroundingLevel
 from engine.app.prompts.grounder_prompt import (
+    ABSENCE_SYSTEM_PROMPT,
     GROUNDER_BATCH_RESPONSE_SCHEMA,
     GROUNDER_BATCH_SYSTEM_PROMPT,
     GROUNDER_RESPONSE_SCHEMA,
     GROUNDER_SYSTEM_PROMPT,
+    build_absence_user_prompt,
     build_grounder_batch_user_prompt,
     build_grounder_user_prompt,
 )
@@ -130,6 +132,10 @@ def _semantic_score(support: str, confidence: Any) -> int:
     return max(0, min(49, 30 - conf // 5))
 
 
+def _is_absence_claim(claim: Claim) -> bool:
+    return claim.category == ClaimCategory.MISSING_CLAUSE
+
+
 class ClaimGrounder:
     def __init__(
         self,
@@ -138,6 +144,7 @@ class ClaimGrounder:
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         ledger: Optional[TokenLedger] = None,
+        request_id: Optional[str] = None,
     ) -> None:
         if client is None:
             resolved = llm_factory.resolve()
@@ -148,6 +155,17 @@ class ClaimGrounder:
             self._model = model or settings.anthropic_fast_model
         self._max_tokens = max_tokens or llm_factory.max_tokens_for(self._model)
         self._ledger = ledger
+        self._request_id = request_id
+
+    def _lobstertrap_metadata(self) -> Optional[dict[str, Any]]:
+        if not self._request_id:
+            return None
+        return {
+            "intent": "grounding_verification",
+            "expects": "json_only",
+            "caller": "trustlayer.grounder",
+            "request_id": self._request_id,
+        }
 
     async def ground(self, claim: Claim, source_context: str) -> GroundingResult:
         source_context = source_context or ""
@@ -160,6 +178,9 @@ class ClaimGrounder:
                 match_location=None,
                 reasoning="Source context is empty.",
             )
+
+        if _is_absence_claim(claim):
+            return await self._ground_absence(claim, source_context)
 
         query = claim.source_quote or claim.text
         match = _best_match(query, source_context)
@@ -177,6 +198,22 @@ class ClaimGrounder:
 
         return await self._ground_single_with_match(claim, source_context, match)
 
+    async def _ground_absence(self, claim: Claim, source_context: str) -> GroundingResult:
+        # Absence claims bypass the fast path because they need to verify
+        # non-existence, which a fuzzy match can't prove.
+        raw = await self._client.create_message(
+            system=ABSENCE_SYSTEM_PROMPT,
+            user=build_absence_user_prompt(claim.text, source_context),
+            model=self._model,
+            max_tokens=self._max_tokens,
+            response_schema=GROUNDER_RESPONSE_SCHEMA,
+            lobstertrap_metadata=self._lobstertrap_metadata(),
+        )
+        if self._ledger is not None:
+            self._ledger.record_from(self._client)
+        data = _parse_grounder_response(raw)
+        return self._build_result(claim, data, source_context, PassageMatch(0, "", 0, 0), is_absence=True)
+
     async def _ground_single_with_match(
         self, claim: Claim, source_context: str, match: PassageMatch
     ) -> GroundingResult:
@@ -187,11 +224,12 @@ class ClaimGrounder:
             model=self._model,
             max_tokens=self._max_tokens,
             response_schema=GROUNDER_RESPONSE_SCHEMA,
+            lobstertrap_metadata=self._lobstertrap_metadata(),
         )
         if self._ledger is not None:
             self._ledger.record_from(self._client)
         data = _parse_grounder_response(raw)
-        return self._build_result(claim, data, source_context, match)
+        return self._build_result(claim, data, source_context, match, is_absence=False)
 
     def _build_result(
         self,
@@ -199,6 +237,7 @@ class ClaimGrounder:
         data: dict[str, Any],
         source_context: str,
         match: PassageMatch,
+        is_absence: bool = False,
     ) -> GroundingResult:
         support = str(data.get("support", "none")).lower().strip()
         passage = data.get("matched_passage")
@@ -211,12 +250,20 @@ class ClaimGrounder:
 
         matched_passage: Optional[str] = None
         location: Optional[tuple[int, int]] = None
-        if support in ("full", "partial"):
+
+        # For normal claims, support:full/partial means we found it.
+        # For absence claims, support:none means we found it (it's not missing).
+        found_evidence = (
+            (not is_absence and support in ("full", "partial"))
+            or (is_absence and support == "none")
+        )
+
+        if found_evidence:
             if passage and passage in source_context:
                 idx = source_context.find(passage)
                 matched_passage = passage
                 location = (idx, idx + len(passage))
-            elif match.score >= settings.grounding_threshold_partial:
+            elif not is_absence and match.score >= settings.grounding_threshold_partial:
                 matched_passage = match.passage
                 location = (match.start, match.end)
 
@@ -239,8 +286,9 @@ class ClaimGrounder:
         source_context = source_context or ""
         results_by_id: dict[str, GroundingResult] = {}
         to_fallback: list[tuple[Claim, PassageMatch]] = []
+        absence_tasks: list[asyncio.Task[GroundingResult]] = []
 
-        # 1. First pass: try fast string matching for everyone.
+        # 1. First pass: try fast string matching for everyone, but skip absence claims.
         for claim in claims:
             if not source_context.strip():
                 results_by_id[claim.id] = GroundingResult(
@@ -251,6 +299,11 @@ class ClaimGrounder:
                     match_location=None,
                     reasoning="Source context is empty.",
                 )
+                continue
+
+            if _is_absence_claim(claim):
+                # Absence claims go straight to specialized semantic check.
+                absence_tasks.append(asyncio.create_task(self._ground_absence(claim, source_context)))
                 continue
 
             query = claim.source_quote or claim.text
@@ -288,6 +341,7 @@ class ClaimGrounder:
                         model=self._model,
                         max_tokens=self._max_tokens,
                         response_schema=GROUNDER_BATCH_RESPONSE_SCHEMA,
+                        lobstertrap_metadata=self._lobstertrap_metadata(),
                     )
                     if self._ledger is not None:
                         self._ledger.record_from(self._client)
@@ -304,7 +358,7 @@ class ClaimGrounder:
                         res_data = results_map.get(claim.id)
                         if res_data:
                             results_by_id[claim.id] = self._build_result(
-                                claim, res_data, source_context, match
+                                claim, res_data, source_context, match, is_absence=False
                             )
                         else:
                             # Retry missing claim individually.
@@ -312,6 +366,12 @@ class ClaimGrounder:
                             results_by_id[claim.id] = await self._ground_single_with_match(
                                 claim, source_context, match
                             )
+
+        # 3. Final pass: wait for absence checks if any.
+        if absence_tasks:
+            absences = await asyncio.gather(*absence_tasks)
+            for res in absences:
+                results_by_id[res.claim_id] = res
 
         return [results_by_id[c.id] for c in claims]
 

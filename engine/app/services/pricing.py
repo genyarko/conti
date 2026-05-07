@@ -46,7 +46,17 @@ def _lookup_price(model: str) -> tuple[float, float] | None:
     return None
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+def estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+) -> float:
+    """Calculate the estimated USD cost of an LLM call.
+
+    Anthropic prompt caching (cache_read_tokens) is charged at a 90% discount
+    relative to standard input tokens.
+    """
     price = _lookup_price(model)
     if price is None:
         if model and model not in _warned_models:
@@ -54,4 +64,8 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
             _warned_models.add(model)
         return 0.0
     in_rate, out_rate = price
-    return (input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate
+    # cache_read_tokens are 10% of the normal input rate.
+    cache_cost = (cache_read_tokens / 1_000_000) * in_rate * 0.1
+    input_cost = (input_tokens / 1_000_000) * in_rate
+    output_cost = (output_tokens / 1_000_000) * out_rate
+    return input_cost + output_cost + cache_cost

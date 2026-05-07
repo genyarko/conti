@@ -9,7 +9,9 @@ from typing import Deque
 class SlidingWindowRateLimiter:
     """In-memory per-key sliding-window rate limiter.
 
-    Not suitable for multi-process deployments — swap for Redis in that case.
+    Methods are async so this and `PgRateLimiter` are interchangeable in
+    main.py; internals are still sync. Single-process only — for multi-replica
+    deployments, swap to `PgRateLimiter` so state is shared.
     """
 
     def __init__(self, *, limit_per_minute: int) -> None:
@@ -18,7 +20,7 @@ class SlidingWindowRateLimiter:
         self._buckets: dict[str, Deque[float]] = {}
         self._lock = Lock()
 
-    def check(self, key: str) -> tuple[bool, int, float]:
+    async def check(self, key: str) -> tuple[bool, int, float]:
         """Return (allowed, remaining, retry_after_seconds)."""
         now = time.monotonic()
         cutoff = now - self._window_s
@@ -35,6 +37,6 @@ class SlidingWindowRateLimiter:
             q.append(now)
             return True, self._limit - len(q), 0.0
 
-    def reset(self) -> None:
+    async def reset(self) -> None:
         with self._lock:
             self._buckets.clear()

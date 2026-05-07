@@ -42,7 +42,7 @@ services:
       - key: ENGINE_LOG_LEVEL
         value: INFO
       - key: CORS_ORIGINS
-        value: "https://conti-nu.vercel.app,http://localhost:5173,http://localhost:3000"
+        value: "https://conti-nu.vercel.app"
       - key: TRUST_PROXY_HEADERS
         value: "true"
 
@@ -88,6 +88,6 @@ services:
           name: trustlayer-engine
           property: hostport
       - key: CORS_ORIGINS
-        value: "https://conti-nu.vercel.app,http://localhost:5173,http://localhost:3000"
+        value: "https://conti-nu.vercel.app"
       - key: DEMO_LOG_LEVEL
         value: INFO

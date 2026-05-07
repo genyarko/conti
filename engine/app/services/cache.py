@@ -18,7 +18,11 @@ def make_cache_key(*parts: str) -> str:
 
 
 class TTLCache(Generic[T]):
-    """Bounded, thread-safe TTL cache with LRU eviction."""
+    """Bounded, thread-safe TTL cache with LRU eviction.
+
+    Methods are async so this and `PgCache` are interchangeable in main.py;
+    internals are still sync (the threading.Lock is held briefly with no I/O).
+    """
 
     def __init__(self, *, ttl_seconds: int, max_entries: int) -> None:
         self._ttl = max(1, int(ttl_seconds))
@@ -28,7 +32,7 @@ class TTLCache(Generic[T]):
         self.hits = 0
         self.misses = 0
 
-    def get(self, key: str) -> Optional[T]:
+    async def get(self, key: str) -> Optional[T]:
         with self._lock:
             item = self._store.get(key)
             if item is None:
@@ -43,18 +47,22 @@ class TTLCache(Generic[T]):
             self.hits += 1
             return value
 
-    def set(self, key: str, value: T) -> None:
+    async def set(self, key: str, value: T) -> None:
         with self._lock:
             self._store[key] = (time.monotonic() + self._ttl, value)
             self._store.move_to_end(key)
             while len(self._store) > self._max:
                 self._store.popitem(last=False)
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         with self._lock:
             self._store.clear()
             self.hits = 0
             self.misses = 0
+
+    async def get_size(self) -> int:
+        with self._lock:
+            return len(self._store)
 
     def __len__(self) -> int:
         with self._lock:

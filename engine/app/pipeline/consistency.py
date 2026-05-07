@@ -155,6 +155,7 @@ class ConsistencyChecker:
         fast_model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         ledger: Optional[TokenLedger] = None,
+        request_id: Optional[str] = None,
     ) -> None:
         if client is None:
             resolved = llm_factory.resolve()
@@ -170,6 +171,17 @@ class ConsistencyChecker:
         # but individual calls will use llm_factory.max_tokens_for() if needed.
         self._max_tokens = max_tokens or llm_factory.max_tokens_for(self._model)
         self._ledger = ledger
+        self._request_id = request_id
+
+    def _lobstertrap_metadata(self) -> Optional[dict[str, Any]]:
+        if not self._request_id:
+            return None
+        return {
+            "intent": "consistency_verification",
+            "expects": "json_only",
+            "caller": "trustlayer.consistency",
+            "request_id": self._request_id,
+        }
 
     async def check_source(
         self, claim: Claim, source_context: str
@@ -181,6 +193,7 @@ class ConsistencyChecker:
             model=self._fast_model,
             max_tokens=llm_factory.max_tokens_for(self._fast_model),
             response_schema=CONSISTENCY_RESPONSE_SCHEMA,
+            lobstertrap_metadata=self._lobstertrap_metadata(),
         )
         if self._ledger is not None:
             self._ledger.record_from(self._client)
@@ -200,6 +213,7 @@ class ConsistencyChecker:
             model=self._model,
             max_tokens=self._max_tokens,
             response_schema=CONTRADICTION_RESPONSE_SCHEMA,
+            lobstertrap_metadata=self._lobstertrap_metadata(),
         )
         if self._ledger is not None:
             self._ledger.record_from(self._client)
@@ -256,6 +270,7 @@ class ConsistencyChecker:
                     model=self._fast_model,
                     max_tokens=llm_factory.max_tokens_for(self._fast_model),
                     response_schema=CONSISTENCY_BATCH_RESPONSE_SCHEMA,
+                    lobstertrap_metadata=self._lobstertrap_metadata(),
                 )
                 if self._ledger is not None:
                     self._ledger.record_from(self._client)

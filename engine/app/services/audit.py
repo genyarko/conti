@@ -65,6 +65,7 @@ class AuditLog:
         limit: int = 100,
         since: Optional[datetime] = None,
         endpoint: Optional[str] = None,
+        api_key_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         if not self._enabled or not self._path.exists():
             return []
@@ -83,6 +84,8 @@ class AuditLog:
                 except ValueError:
                     continue
                 if endpoint and record.get("endpoint") != endpoint:
+                    continue
+                if api_key_id is not None and record.get("api_key_id") != api_key_id:
                     continue
                 if since is not None:
                     ts = _parse_iso(record.get("timestamp"))
@@ -155,25 +158,29 @@ class TraceStore:
         self._ttl = max(1, int(ttl_seconds))
         self._max = max(1, int(max_entries))
         self._enabled = bool(enabled)
-        self._data: OrderedDict[str, tuple[float, VerifyTrace]] = OrderedDict()
+        self._data: OrderedDict[str, tuple[float, VerifyTrace, Optional[str]]] = OrderedDict()
         self._lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
-    async def save(self, trace: VerifyTrace) -> None:
+    async def save(
+        self, trace: VerifyTrace, *, api_key_id: Optional[str] = None
+    ) -> None:
         """Save a trace. Async to share the interface with PgTraceStore;
         the in-memory implementation itself is synchronous."""
         if not self._enabled:
             return
         now = monotonic()
         with self._lock:
-            self._data[trace.request_id] = (now, trace)
+            self._data[trace.request_id] = (now, trace, api_key_id)
             self._data.move_to_end(trace.request_id)
             self._evict_locked(now)
 
-    async def get(self, request_id: str) -> Optional[VerifyTrace]:
+    async def get(
+        self, request_id: str, *, api_key_id: Optional[str] = None
+    ) -> Optional[VerifyTrace]:
         if not self._enabled:
             return None
         now = monotonic()
@@ -181,9 +188,13 @@ class TraceStore:
             entry = self._data.get(request_id)
             if entry is None:
                 return None
-            stored_at, trace = entry
+            stored_at, trace, stored_key = entry
             if now - stored_at > self._ttl:
                 self._data.pop(request_id, None)
+                return None
+            # Tenant isolation: when the caller's key is provided, only the
+            # owning key (or legacy traces saved with no key) can read.
+            if api_key_id is not None and stored_key is not None and stored_key != api_key_id:
                 return None
             self._data.move_to_end(request_id)
             return trace
@@ -198,7 +209,7 @@ class TraceStore:
 
     def _evict_locked(self, now: float) -> None:
         # Drop anything past its TTL first.
-        expired = [k for k, (t, _) in self._data.items() if now - t > self._ttl]
+        expired = [k for k, entry in self._data.items() if now - entry[0] > self._ttl]
         for k in expired:
             self._data.pop(k, None)
         # Then cap total size; OrderedDict iteration order is insertion/move-to-end.
@@ -209,6 +220,7 @@ class TraceStore:
 def build_verify_record(
     *,
     request_id: str,
+    api_key_id: Optional[str] = None,
     endpoint: str,
     model: str,
     status_code: int,
@@ -222,9 +234,15 @@ def build_verify_record(
     batch_id: Optional[str] = None,
     batch_index: Optional[int] = None,
     error: Optional[str] = None,
+    security_risk_score: Optional[str] = None,
+    security_intent_detected: Optional[str] = None,
+    security_intent_declared: Optional[str] = None,
+    security_action: Optional[str] = None,
+    security_intent_mismatch: bool = False,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "request_id": request_id,
+        "api_key_id": api_key_id,
         "timestamp": _utc_now_iso(),
         "endpoint": endpoint,
         "model": model,
@@ -237,6 +255,11 @@ def build_verify_record(
         "output_tokens": int(output_tokens),
         "total_tokens": int(input_tokens) + int(output_tokens),
         "estimated_cost_usd": round(float(estimated_cost_usd), 6),
+        "security_risk_score": security_risk_score,
+        "security_intent_detected": security_intent_detected,
+        "security_intent_declared": security_intent_declared,
+        "security_action": security_action,
+        "security_intent_mismatch": security_intent_mismatch,
     }
     if batch_id is not None:
         record["batch_id"] = batch_id

@@ -141,6 +141,7 @@ class ClaimExtractor:
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         ledger: Optional[TokenLedger] = None,
+        request_id: Optional[str] = None,
     ) -> None:
         if client is None:
             resolved = llm_factory.resolve()
@@ -154,6 +155,7 @@ class ClaimExtractor:
             self._model = model or settings.anthropic_fast_model
         self._max_tokens = max_tokens or llm_factory.max_tokens_for(self._model)
         self._ledger = ledger
+        self._request_id = request_id
 
     async def extract(self, llm_output: str) -> ExtractionResult:
         if not llm_output or not llm_output.strip():
@@ -172,6 +174,15 @@ class ClaimExtractor:
         raw_responses: list[str] = []
         seen_text: set[str] = set()
 
+        lobstertrap_metadata = None
+        if self._request_id:
+            lobstertrap_metadata = {
+                "intent": "claim_extraction",
+                "expects": "json_only",
+                "caller": "trustlayer.extractor",
+                "request_id": self._request_id,
+            }
+
         for chunk in chunks:
             user_prompt = build_user_prompt(chunk, structured=structured)
             raw = await self._client.create_message(
@@ -180,6 +191,7 @@ class ClaimExtractor:
                 model=self._model,
                 max_tokens=self._max_tokens,
                 response_schema=EXTRACTOR_RESPONSE_SCHEMA,
+                lobstertrap_metadata=lobstertrap_metadata,
             )
             if self._ledger is not None:
                 self._ledger.record_from(self._client)

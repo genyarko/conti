@@ -23,6 +23,7 @@ class FakeClient:
 
     responses: list[str]
     calls: list[dict] = field(default_factory=list)
+    security_events: list[dict] = field(default_factory=list)
     _idx: int = 0
 
     async def create_message(
@@ -33,6 +34,7 @@ class FakeClient:
         model: str,
         max_tokens: int,
         response_schema: dict | None = None,
+        lobstertrap_metadata: dict | None = None,
     ) -> str:
         self.calls.append(
             {
@@ -41,6 +43,7 @@ class FakeClient:
                 "model": model,
                 "max_tokens": max_tokens,
                 "response_schema": response_schema,
+                "lobstertrap_metadata": lobstertrap_metadata,
             }
         )
         if self._idx >= len(self.responses):

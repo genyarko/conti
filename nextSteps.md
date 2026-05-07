@@ -3,24 +3,19 @@
 > **Core product:** A general-purpose API that verifies any LLM output for hallucinations, ungrounded claims, and logical inconsistencies.  
 > **Showcase demo:** An AI Contract Reviewer powered by TrustLayer, proving the engine works on a high-stakes real-world use case.
 
-*** Re-tighten the org policies after deploy succeeds.
+*** pending: 1. Security: Tenant Isolation (Phase 13, §4) — INCOMPLETE
+  While we added the api_key_id column to the database and audit records, the read endpoints are not yet restricted:
+   * Audit Access: Currently, any valid bearer token can see all audit events via GET /audit/events. It needs to be filtered so you only see logs for your own key.
+   * Trace Access: Similarly, GET /verify/trace/{request_id} allows anyone with a request ID to fetch the trace. It should verify that the api_key_id of the trace matches the caller.
 
-**  Verifier-side skip for absence claims. A finding with title.startswith("Missing") or category == missing_clause shouldn't go through the clause-grounding pass at all —
-  it should bypass to a "does the document contain anything about X?" check. That fixes the second bug too (the Set-off case still has a real grounded half, but absence
-  claims as a class shouldn't be measured by clause-level grounding).
+  2. Auth Scoping (Phase 13, §5) — NOT STARTED
+  This was marked as "only if forced by a partner," but it's technically still on the list:
+   * Implementing granular permissions (e.g., a token that can only read /stats but cannot perform a /verify).
 
-  *** Strong agree                                                                                                                                                                
-  - Batched LLM operations — real latency/cost win, low risk, standard optimization. Easiest ROI on the list.
-  - Flash vs. Pro tiering — directly leverages what you already have. Cheap claims (string-match misses) don't need Pro; cross-clause contradiction reasoning does. Concrete  
-  and measurable.                                                                                                                                                           
-  - Red-teaming / adversarial agent — this is the one that turns "we detect hallucinations" into a defensible claim. Without an adversarial harness, you have no recall     
-  number. Best credibility-per-effort item here.
-
-  Mixed
-  - Vector-based grounding — only worth it if you're actually hitting context limits on real contracts. For typical contracts (sub-100 pages), rapidfuzz + targeted LLM checks
-   is often better than embeddings, which blur exact-clause matching. Don't add a vector DB to look enterprise-y.
-  - HITL feedback — logging corrections as a gold-standard set: yes. "Fine-tune future models": overselling, drop that framing. A growing eval set is the real value.
-  - Verification graph — strong demo asset, but only if relationships are dense enough to visualize meaningfully. Risk of looking like a sparse, gimmicky chart.
+  3. Post-Deployment Tasks — PENDING
+  These were the items we recently moved to the bottom of the file:
+   * CORS Tightening: Your render.yaml currently allows localhost and your Vercel URL. You might want to remove localhost for the final production move.
+   * Budget/Idempotency Edge Cases: A final code review of how the middleware handles "streaming" responses (if you ever add them) or high-concurrency race conditions during budget subtraction.
 
 ---
 
@@ -28,13 +23,14 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                    TRUSTLAYER ENGINE (core product)               │
+│             TRUSTLAYER ENGINE (Powered by Gemini 3.1)             │
 │                                                                  │
 │  Input: { source_context, llm_output, schema? }                  │
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
 │  │  Claim        │→ │  Source       │→ │  Logical               │  │
 │  │  Extractor    │  │  Grounder    │  │  Consistency Checker   │  │
+│  │ (Gemini Flash)│  │(Gemini Flash)│  │ (Gemini Pro)           │  │
 │  └──────────────┘  └──────────────┘  └────────────────────────┘  │
 │         │                 │                      │                │
 │         ▼                 ▼                      ▼                │
@@ -43,6 +39,12 @@
 │  ┌──────────────────────────────────────────────────────────┐    │
 │  │  Aggregator → per-claim + overall integrity report       │    │
 │  └──────────────────────────────────────────────────────────┘    │
+│         │                                                        │
+│         └──────────┐                                             │
+│                    ▼                                             │
+│          ┌──────────────────────┐        ┌──────────────────┐    │
+│          │ Durable Audit (PG)   │ ──────▶ │ Cold Storage (R2)│    │
+│          └──────────────────────┘        └──────────────────┘    │
 │                                                                  │
 │  Output: { verified_claims[], flagged_claims[],                  │
 │            hallucinations[], integrity_score, report }            │
@@ -375,7 +377,7 @@ Ranked by impact on the codebase as it stands. Items 1–2 close real durability
      - `audit_events (id, request_id, endpoint, model, latency_ms, outcome_counts jsonb, tokens_in, tokens_out, cost_usd, created_at)` — append-only, replaces the JSONL writer.
      - `verify_traces (request_id pk, endpoint, report jsonb, evidence jsonb, expires_at)` — keyed lookup with TTL via an `expires_at` column.
    - Add a single periodic sweeper (FastAPI startup task or `pg_cron`) that runs `DELETE FROM verify_traces WHERE expires_at < now()` and optionally archives `audit_events` older than N days to R2.
-   - Optional cold storage: when audit rows exceed the free-tier budget, batch-flush old rows to Cloudflare R2 (no egress fees) as date-partitioned JSONL and `DELETE` them from Postgres. R2 is fine for audit because it's write-mostly + append-only. **Do not** put trace there — keyed lookup with 15-min TTL is the wrong access pattern for object storage.
+   - ✅ **COMPLETED:** Cold storage: audit rows older than 30 days are batch-flushed to Cloudflare R2 as date-partitioned JSONL and purged from Postgres.
    - Acceptance: kill the engine pod between a `/verify` call and a `/verify/trace/{request_id}` lookup, and the trace still resolves.
 
 2. **Postgres-backed limiter / cache (then horizontal scale is safe)**
@@ -401,3 +403,8 @@ Ranked by impact on the codebase as it stands. Items 1–2 close real durability
    - Current shared-secret bearer auth (`engine/app/main.py:150-158`) is fine until there's a real reason to give partners read-only access to a subset of endpoints.
    - Min-viable upgrade when needed: two tokens — `API_AUTH_TOKEN` for `/verify*` and a separate `ADMIN_TOKEN` for `/audit*` and `/stats`.
    - Defer JWT scopes (`verify:write` / `audit:read` / `stats:read`) until there's a concrete partner-integration driver; the JWT machinery is over-engineered for current maturity.
+
+## Post-Deployment Tasks
+
+- [ ] Re-tighten the org policies (CORS, rate limits, API key configs).
+- [ ] Review implementation of **Per-key budget caps + idempotency keys** for production edge cases.

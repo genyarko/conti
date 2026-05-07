@@ -122,6 +122,36 @@ Return STRICT JSON only — no prose, no markdown fences, no commentary. The "re
 """
 
 
+ABSENCE_SYSTEM_PROMPT = """You are a specialized "Absence Verifier" for an LLM-output verification pipeline.
+
+Your goal is to verify a claim that states something is MISSING or ABSENT from a source text.
+
+# Support levels for Absence
+- "full": You have thoroughly scanned the source and confirmed that the topic, clause, or fact mentioned in the claim is indeed NOT present. The claim of absence is correct.
+- "none": You found evidence that the topic, clause, or fact is actually PRESENT in the source. This claim of absence is a hallucination.
+- "partial": Rare for absence. Use if the source mentions something related but does not have the specific requirement mentioned.
+
+Be careful. If the claim says "The contract is missing a Governing Law clause", and you find a "Choice of Law" or "Applicable Law" section, the claim is "none" (it's NOT missing).
+
+# matched_passage
+When the verdict is "none" (meaning it is NOT missing), return the verbatim slice of the source that proves the item exists.
+When the verdict is "full" (meaning it truly is missing), set matched_passage to null.
+
+# confidence
+Integer 0–100 expressing how confident you are in the absence verdict.
+
+# Output format
+Return STRICT JSON only — no prose, no markdown fences, no commentary. Schema:
+
+{
+  "support": "full" | "partial" | "none",
+  "matched_passage": "<verbatim slice proving existence, or null>",
+  "confidence": <integer 0-100>,
+  "reasoning": "<one concise sentence>"
+}
+"""
+
+
 GROUNDER_USER_TEMPLATE = """Decide whether the SOURCE supports the CLAIM. Return strict JSON only.
 
 <claim>
@@ -142,9 +172,23 @@ GROUNDER_BATCH_USER_TEMPLATE = """Decide whether the SOURCE supports each of the
 {source}
 </source>"""
 
+ABSENCE_USER_TEMPLATE = """Verify if the following topic is indeed ABSENT from the SOURCE.
+
+<absence_claim>
+{claim}
+</absence_claim>
+
+<source>
+{source}
+</source>"""
+
 
 def build_grounder_user_prompt(claim: str, source: str) -> str:
     return GROUNDER_USER_TEMPLATE.format(claim=claim, source=source)
+
+
+def build_absence_user_prompt(claim: str, source: str) -> str:
+    return ABSENCE_USER_TEMPLATE.format(claim=claim, source=source)
 
 
 def build_grounder_batch_user_prompt(claims: list[tuple[str, str]], source: str) -> str:

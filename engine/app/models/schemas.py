@@ -13,6 +13,7 @@ class ClaimCategory(str, Enum):
     INTERPRETIVE = "interpretive"
     RECOMMENDATION = "recommendation"
     QUANTITATIVE = "quantitative"
+    MISSING_CLAUSE = "missing_clause"
 
 
 class GroundingLevel(str, Enum):
@@ -150,6 +151,12 @@ class ReportMetadata(BaseModel):
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     claim_count: int = 0
+    # Lobster Trap security metrics
+    security_risk_score: Optional[str] = None
+    security_intent_detected: Optional[str] = None
+    security_intent_declared: Optional[str] = None
+    security_action: Optional[str] = None
+    security_intent_mismatch: bool = False
 
 
 class IntegrityReport(BaseModel):

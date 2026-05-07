@@ -11,6 +11,7 @@ from app.config import settings
 from app.models.schemas import (
     Clause,
     Finding,
+    FindingCategory,
     VerificationStatus,
     VerifiedFinding,
 )
@@ -146,11 +147,21 @@ class TrustLayerVerifier:
 
     @staticmethod
     def _claims_for(finding: Finding) -> list[dict[str, Any]]:
+        # Use the specialized missing_clause category so TrustLayer bypasses
+        # normal grounding for absence checks.
+        category = "interpretive"
+        if (
+            finding.category == FindingCategory.MISSING_CLAUSE
+            or finding.section_id == "missing"
+            or finding.title.lower().startswith("missing")
+        ):
+            category = "missing_clause"
+
         claims = [
             {
                 "id": f"{finding.id}-summary",
                 "text": finding.summary,
-                "category": "interpretive",
+                "category": category,
             }
         ]
         if finding.recommendation:

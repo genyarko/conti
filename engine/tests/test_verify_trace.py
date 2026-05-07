@@ -110,10 +110,10 @@ def _reset_metrics():
 
 
 @pytest.fixture(autouse=True)
-def _disable_cache(monkeypatch: pytest.MonkeyPatch):
+async def _disable_cache(monkeypatch: pytest.MonkeyPatch):
     """Force the pipeline to actually run so trace evidence is populated —
     the shared cache can otherwise short-circuit subsequent calls."""
-    main_module._report_cache.clear()
+    await main_module._report_cache.clear()
     from engine.config import settings
 
     monkeypatch.setattr(settings, "cache_enabled", False)
@@ -221,6 +221,84 @@ def test_trace_404_when_store_disabled(monkeypatch):
 
     r2 = client.get(f"/verify/trace/{request_id}")
     assert r2.status_code == 404
+
+
+def test_trace_404_when_other_tenant_owns_request_id(monkeypatch):
+    """A second caller with a different api_key_id must not see another
+    tenant's trace — the lookup returns 404, identical to the not-found
+    response, to avoid disclosing existence across keys."""
+    monkeypatch.setattr(main_module, "VerifyPipeline", _pipeline_factory_with_evidence())
+
+    # Use a fresh store and stamp the saved trace with a specific api_key_id
+    # that won't match the request.state.api_key_id used by the lookup.
+    store = TraceStore(ttl_seconds=60, max_entries=16, enabled=True)
+    monkeypatch.setattr(main_module, "_trace_store", store)
+
+    r = client.post("/verify", json={"source_context": "s", "llm_output": "o"})
+    assert r.status_code == 200
+    request_id = r.headers["X-Request-ID"]
+
+    # First call is owned by api_key_id="default" (no auth configured).
+    # Manually re-tag the saved entry to simulate a different owner so the
+    # lookup runs the filter.
+    with store._lock:
+        stored_at, trace, _ = store._data[request_id]
+        store._data[request_id] = (stored_at, trace, "alice")
+
+    r2 = client.get(f"/verify/trace/{request_id}")
+    assert r2.status_code == 404
+    assert r2.json()["error"] == "trace_not_found"
+
+
+async def test_trace_store_filters_by_api_key_id_in_memory():
+    from engine.app.models.schemas import (
+        IntegrityReport,
+        ReportMetadata,
+        VerifyTrace,
+    )
+
+    store = TraceStore(ttl_seconds=60, max_entries=16, enabled=True)
+
+    def make_trace(rid: str) -> VerifyTrace:
+        md = ReportMetadata(model="test", request_id=rid)
+        return VerifyTrace(
+            request_id=rid,
+            endpoint="/verify",
+            report=IntegrityReport(overall_score=100, metadata=md),
+            evidence=[],
+        )
+
+    await store.save(make_trace("req_a"), api_key_id="alice")
+    await store.save(make_trace("req_b"), api_key_id="bob")
+
+    assert (await store.get("req_a", api_key_id="alice")) is not None
+    assert (await store.get("req_a", api_key_id="bob")) is None
+    assert (await store.get("req_b", api_key_id="bob")) is not None
+    # Internal callers (no key supplied) still see everything.
+    assert (await store.get("req_a")) is not None
+
+
+async def test_audit_log_filters_by_api_key_id_in_memory(tmp_path):
+    log_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path=log_path, max_bytes=1024 * 1024, enabled=True)
+
+    await audit.append({
+        "request_id": "r_alice",
+        "api_key_id": "alice",
+        "endpoint": "/verify",
+        "timestamp": "2026-04-29T12:00:00.000Z",
+    })
+    await audit.append({
+        "request_id": "r_bob",
+        "api_key_id": "bob",
+        "endpoint": "/verify",
+        "timestamp": "2026-04-29T12:01:00.000Z",
+    })
+
+    alice = await audit.read_tail(limit=10, api_key_id="alice")
+    assert [r["request_id"] for r in alice] == ["r_alice"]
+    bob = await audit.read_tail(limit=10, api_key_id="bob")
+    assert [r["request_id"] for r in bob] == ["r_bob"]
 
 
 async def test_trace_store_ttl_evicts_entries():

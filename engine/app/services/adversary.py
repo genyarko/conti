@@ -47,16 +47,26 @@ class AdversaryAgent:
         self._ledger = ledger
         self._max_tokens = llm_factory.max_tokens_for(self._model)
 
-    async def generate_adversarial_summary(self, source_context: str) -> AdversarialOutput:
+    async def generate_adversarial_summary(self, source_context: str, request_id: Optional[str] = None) -> AdversarialOutput:
         """Generates a summary with subtle hallucinations and contradictions."""
         log.info("Generating adversarial summary for stress testing...")
         
+        lobstertrap_metadata = None
+        if request_id:
+            lobstertrap_metadata = {
+                "intent": "adversarial_generation",
+                "expects": "json_only",
+                "caller": "trustlayer.adversary",
+                "request_id": request_id,
+            }
+
         raw = await self._client.create_message(
             system=ADVERSARY_SYSTEM_PROMPT,
             user=build_adversary_user_prompt(source_context),
             model=self._model,
             max_tokens=self._max_tokens,
             response_schema=ADVERSARY_RESPONSE_SCHEMA,
+            lobstertrap_metadata=lobstertrap_metadata,
         )
         
         if self._ledger is not None:
