@@ -3,14 +3,6 @@
 > **Core product:** A general-purpose API that verifies any LLM output for hallucinations, ungrounded claims, and logical inconsistencies.  
 > **Showcase demo:** An AI Contract Reviewer powered by TrustLayer, proving the engine works on a high-stakes real-world use case.
 
-*** pending: 1. Security: Tenant Isolation (Phase 13, §4) — INCOMPLETE
-  While we added the api_key_id column to the database and audit records, the read endpoints are not yet restricted:
-   * Audit Access: Currently, any valid bearer token can see all audit events via GET /audit/events. It needs to be filtered so you only see logs for your own key.
-   * Trace Access: Similarly, GET /verify/trace/{request_id} allows anyone with a request ID to fetch the trace. It should verify that the api_key_id of the trace matches the caller.
-
-  2. Auth Scoping (Phase 13, §5) — NOT STARTED
-  This was marked as "only if forced by a partner," but it's technically still on the list:
-   * Implementing granular permissions (e.g., a token that can only read /stats but cannot perform a /verify).
 
   3. Post-Deployment Tasks — PENDING
   These were the items we recently moved to the bottom of the file:

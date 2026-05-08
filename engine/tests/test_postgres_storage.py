@@ -92,6 +92,9 @@ class _FakeConn:
         elif "delete from idempotency_keys" in sql_lc:
             api_key_id, idempotency_key = args
             self._store.idempotency_keys.pop((api_key_id, idempotency_key), None)
+        elif "delete from budget_reservations" in sql_lc and "where id =" in sql_lc:
+            (rid,) = args
+            self._store.budget_reservations.pop(int(rid), None)
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
@@ -118,11 +121,13 @@ class _FakeConn:
         self._store.executed.append((sql, args))
         sql_lc = sql.strip().lower()
 
-        # Sweeper: combined CTE that deletes from all three tables.
+        # Sweeper: combined CTE that deletes from all tables including budget_reservations.
         if (
             "delete from verify_traces" in sql_lc
             and "delete from response_cache" in sql_lc
             and "delete from rate_events" in sql_lc
+            and "delete from idempotency_keys" in sql_lc
+            and "delete from budget_reservations" in sql_lc
         ):
             now = datetime.now(tz=timezone.utc)
             window_seconds = int(args[0]) if args else 60
@@ -148,7 +153,21 @@ class _FakeConn:
             expired_event_count = len(self._store.rate_events) - len(kept_events)
             self._store.rate_events = kept_events
 
-            return {"n": len(expired_traces) + len(expired_cache) + expired_event_count}
+            expired_idem = [
+                k for k, r in self._store.idempotency_keys.items()
+                if r["expires_at"] < now
+            ]
+            for k in expired_idem:
+                del self._store.idempotency_keys[k]
+                
+            expired_res = [
+                k for k, r in self._store.budget_reservations.items()
+                if r["expires_at"] < now
+            ]
+            for k in expired_res:
+                del self._store.budget_reservations[k]
+
+            return {"n": len(expired_traces) + len(expired_cache) + expired_event_count + len(expired_idem) + len(expired_res)}
 
         # Single-table sweeper (legacy verify_traces only) — kept for safety.
         if "delete from verify_traces" in sql_lc and "from t" in sql_lc:
@@ -199,7 +218,65 @@ class _FakeConn:
                 self._store.rate_events.append({"key": key, "ts": now})
             return {"n": n, "oldest_ts": oldest_ts, "allowed": allowed}
 
-        # Budget usage.
+        # Budget try_reserve
+        if "inserted as" in sql_lc and "insert into budget_reservations" in sql_lc:
+            api_key_id, usd_cap, token_cap, est_usd, est_tokens, expires_at = args
+            
+            # calculate spent
+            rows = [r for r in self._store.audit_rows if r.get("api_key_id") == api_key_id]
+            spent_usd = sum(float(json.loads(r["payload"]).get("estimated_cost_usd", 0)) for r in rows)
+            spent_tokens = sum(int(json.loads(r["payload"]).get("total_tokens", 0)) for r in rows)
+            
+            # calculate reserved
+            now = datetime.now(tz=timezone.utc)
+            res_rows = [r for r in self._store.budget_reservations.values() if r["api_key_id"] == api_key_id and r["expires_at"] > now]
+            reserved_usd = sum(float(r["estimated_usd"]) for r in res_rows)
+            reserved_tokens = sum(int(r["estimated_tokens"]) for r in res_rows)
+            
+            total_usd = spent_usd + reserved_usd
+            total_tokens = spent_tokens + reserved_tokens
+            
+            fits_usd = usd_cap is None or total_usd + float(est_usd) <= float(usd_cap)
+            fits_tokens = token_cap is None or total_tokens + int(est_tokens) <= int(token_cap)
+            
+            res_id = None
+            if fits_usd and fits_tokens:
+                res_id = self._store._next_res_id
+                self._store._next_res_id += 1
+                self._store.budget_reservations[res_id] = {
+                    "id": res_id,
+                    "api_key_id": api_key_id,
+                    "estimated_usd": float(est_usd),
+                    "estimated_tokens": int(est_tokens),
+                    "expires_at": expires_at,
+                }
+                
+            return {
+                "total_usd": total_usd,
+                "total_tokens": total_tokens,
+                "reservation_id": res_id,
+            }
+
+        # Budget usage (get_usage).
+        if "spent.usd + reserved.usd as usd" in sql_lc and "budget_reservations" in sql_lc:
+            api_key_id = args[0]
+            # calculate spent
+            rows = [r for r in self._store.audit_rows if r.get("api_key_id") == api_key_id]
+            spent_usd = sum(float(json.loads(r["payload"]).get("estimated_cost_usd", 0)) for r in rows)
+            spent_tokens = sum(int(json.loads(r["payload"]).get("total_tokens", 0)) for r in rows)
+            
+            # calculate reserved
+            now = datetime.now(tz=timezone.utc)
+            res_rows = [r for r in self._store.budget_reservations.values() if r["api_key_id"] == api_key_id and r["expires_at"] > now]
+            reserved_usd = sum(float(r["estimated_usd"]) for r in res_rows)
+            reserved_tokens = sum(int(r["estimated_tokens"]) for r in res_rows)
+            
+            return {
+                "usd": spent_usd + reserved_usd,
+                "tokens": spent_tokens + reserved_tokens,
+            }
+
+        # Budget usage (legacy without budget_reservations).
         if "estimated_cost_usd" in sql_lc and "audit_events" in sql_lc:
             api_key_id = args[0]
             rows = [r for r in self._store.audit_rows if r.get("api_key_id") == api_key_id]
@@ -266,6 +343,8 @@ class _FakeStore:
         self.cache_rows: dict[str, dict[str, Any]] = {}
         self.rate_events: list[dict[str, Any]] = []
         self.idempotency_keys: dict[tuple[str, str], dict[str, Any]] = {}
+        self.budget_reservations: dict[int, dict[str, Any]] = {}
+        self._next_res_id = 1
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
         self.closed = False
 
@@ -549,6 +628,51 @@ async def test_pg_budget_store_get_usage(pg_store: PostgresStore):
     usage = await budget.get_usage("key_1")
     assert usage[0] == pytest.approx(0.15)
     assert usage[1] == 3000
+
+
+async def test_pg_budget_store_try_reserve(pg_store: PostgresStore):
+    from engine.app.services.postgres import PgBudgetStore
+    budget = PgBudgetStore(pg_store)
+    audit = PgAuditLog(pg_store, enabled=True)
+
+    await audit.append({
+        "request_id": "r1",
+        "api_key_id": "key_1",
+        "total_tokens": 1000,
+        "estimated_cost_usd": 0.15,
+        "endpoint": "/verify",
+    })
+
+    # Under cap -> success
+    rid, total_usd, total_tok = await budget.try_reserve(
+        "key_1", usd_cap=1.0, token_cap=10000,
+        estimated_usd=0.5, estimated_tokens=1000, ttl_seconds=60
+    )
+    assert rid is not None
+    assert total_usd == pytest.approx(0.15)
+    assert total_tok == 1000
+
+    # Over cap because of the new reservation -> fail
+    rid2, total_usd2, total_tok2 = await budget.try_reserve(
+        "key_1", usd_cap=1.0, token_cap=10000,
+        estimated_usd=0.5, estimated_tokens=1000, ttl_seconds=60
+    )
+    assert rid2 is None
+    # total_* still returns the snapshot (0.15 + 0.5 = 0.65)
+    assert total_usd2 == pytest.approx(0.65)
+    assert total_tok2 == 2000
+
+    # Release the first reservation
+    await budget.release(rid)
+
+    # Now it fits again
+    rid3, total_usd3, total_tok3 = await budget.try_reserve(
+        "key_1", usd_cap=1.0, token_cap=10000,
+        estimated_usd=0.5, estimated_tokens=1000, ttl_seconds=60
+    )
+    assert rid3 is not None
+    assert total_usd3 == pytest.approx(0.15)
+    assert total_tok3 == 1000
 
 
 async def test_pg_idempotency_store_workflow(pg_store: PostgresStore):

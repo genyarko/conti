@@ -113,6 +113,17 @@ class Settings(BaseSettings):
     budget_enabled: bool = Field(default=True, alias="BUDGET_ENABLED")
     default_daily_usd_cap: float = Field(default=10.0, alias="DEFAULT_DAILY_USD_CAP")
     default_daily_token_cap: int = Field(default=1_000_000, alias="DEFAULT_DAILY_TOKEN_CAP")
+    # Provisional hold per in-flight /verify call. Bounds the burst over-spend
+    # to (concurrent_requests * reservation) on top of the cap; set high
+    # enough that legitimate calls don't get pre-empted, low enough that
+    # bursts can't tunnel through the cap.
+    budget_reservation_usd: float = Field(default=0.50, alias="BUDGET_RESERVATION_USD")
+    budget_reservation_tokens: int = Field(default=20_000, alias="BUDGET_RESERVATION_TOKENS")
+    # Safety net — if a request crashes before releasing its reservation,
+    # the row expires after this TTL.
+    budget_reservation_ttl_seconds: int = Field(
+        default=300, alias="BUDGET_RESERVATION_TTL_SECONDS"
+    )
 
     # --- Idempotency ---
     idempotency_ttl_seconds: int = Field(default=86400, alias="IDEMPOTENCY_TTL_SECONDS")  # 24h

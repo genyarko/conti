@@ -523,14 +523,22 @@ async def budget_middleware(request: Request, call_next):
     if usd_cap is None and token_cap is None:
         return await call_next(request)
 
-    # 2. Get usage.
-    usd_spent, tokens_spent = await _budget_store.get_usage(api_key_id)
+    # 2. Atomic check-and-reserve. Without this, two concurrent requests on
+    # the same key can both observe a fresh under-cap snapshot and both
+    # proceed — burning past the cap by N requests' worth of cost. The
+    # reservation is a single CTE that snapshots audit_events + active
+    # reservations and inserts iff the new request still fits, so only one
+    # of N concurrent callers wins when the cap is one request away.
+    reservation_id, usd_total, tokens_total = await _budget_store.try_reserve(
+        api_key_id,
+        usd_cap=usd_cap,
+        token_cap=token_cap,
+        estimated_usd=settings.budget_reservation_usd,
+        estimated_tokens=settings.budget_reservation_tokens,
+        ttl_seconds=settings.budget_reservation_ttl_seconds,
+    )
 
-    # 3. Check.
-    over_usd = usd_cap is not None and usd_spent >= usd_cap
-    over_tokens = token_cap is not None and tokens_spent >= token_cap
-
-    if over_usd or over_tokens:
+    if reservation_id is None:
         reset_seconds = 3600  # Coarse reset estimate: next hour.
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -549,15 +557,23 @@ async def budget_middleware(request: Request, call_next):
             },
         )
 
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    finally:
+        # Always release — the audit row appended during the request now
+        # carries the real spend, so the provisional hold has done its job.
+        # Wrapped in try/except inside the store so a release failure
+        # doesn't mask the underlying response.
+        await _budget_store.release(reservation_id)
 
-    # Add budget headers to successful response.
+    # Add budget headers based on the snapshot the reservation observed —
+    # callers see the committed view including their own in-flight cost.
     if usd_cap:
         response.headers["X-Budget-USD-Limit"] = str(usd_cap)
-        response.headers["X-Budget-USD-Remaining"] = str(max(0.0, usd_cap - usd_spent))
+        response.headers["X-Budget-USD-Remaining"] = str(max(0.0, usd_cap - usd_total))
     if token_cap:
         response.headers["X-Budget-Tokens-Limit"] = str(token_cap)
-        response.headers["X-Budget-Tokens-Remaining"] = str(max(0, token_cap - tokens_spent))
+        response.headers["X-Budget-Tokens-Remaining"] = str(max(0, token_cap - tokens_total))
 
     return response
 

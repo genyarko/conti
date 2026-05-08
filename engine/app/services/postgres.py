@@ -100,6 +100,21 @@ CREATE TABLE IF NOT EXISTS rate_events (
 );
 CREATE INDEX IF NOT EXISTS rate_events_key_ts_idx ON rate_events (key, ts);
 CREATE INDEX IF NOT EXISTS rate_events_ts_idx     ON rate_events (ts);
+
+-- Provisional budget holds. Inserted atomically before a /verify call runs;
+-- deleted when the call resolves and the audit row carries the real spend.
+-- An expires_at TTL bounds the over-spend window if a request crashes
+-- before reaching the release path.
+CREATE TABLE IF NOT EXISTS budget_reservations (
+    id               BIGSERIAL PRIMARY KEY,
+    api_key_id       TEXT NOT NULL,
+    estimated_usd    NUMERIC(12,4) NOT NULL DEFAULT 0,
+    estimated_tokens BIGINT NOT NULL DEFAULT 0,
+    expires_at       TIMESTAMPTZ NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS budget_reservations_key_idx     ON budget_reservations (api_key_id, expires_at);
+CREATE INDEX IF NOT EXISTS budget_reservations_expires_idx ON budget_reservations (expires_at);
 """
 
 
@@ -173,12 +188,16 @@ class PostgresStore:
                 ),
                 i AS (
                     DELETE FROM idempotency_keys WHERE expires_at < now() RETURNING 1
+                ),
+                b AS (
+                    DELETE FROM budget_reservations WHERE expires_at < now() RETURNING 1
                 )
                 SELECT
                     (SELECT count(*) FROM t)
                   + (SELECT count(*) FROM c)
                   + (SELECT count(*) FROM r)
-                  + (SELECT count(*) FROM i) AS n
+                  + (SELECT count(*) FROM i)
+                  + (SELECT count(*) FROM b) AS n
                 """,
                 int(rate_window_seconds),
             )
@@ -188,7 +207,10 @@ class PostgresStore:
 class PgBudgetStore:
     """Postgres-backed budget tracker.
 
-    Aggregates spend from `audit_events` for the rolling 24h window.
+    Spend = audit_events sum (real cost from completed calls) + budget_reservations
+    sum (provisional holds for in-flight calls). The hold is taken atomically
+    in a single CTE so concurrent requests can't both observe a fresh
+    "under-budget" snapshot and tunnel past the cap.
     """
 
     def __init__(self, store: PostgresStore) -> None:
@@ -197,16 +219,31 @@ class PgBudgetStore:
     async def get_usage(
         self, api_key_id: str
     ) -> tuple[float, int]:
-        """Return (daily_usd_spent, daily_tokens_spent)."""
+        """Return (daily_usd_spent, daily_tokens_spent), inclusive of
+        in-flight reservations so X-Budget-* headers reflect the true
+        committed state."""
         try:
             async with self._store.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
+                    WITH spent AS (
+                        SELECT
+                            COALESCE(SUM((payload->>'estimated_cost_usd')::numeric), 0) AS usd,
+                            COALESCE(SUM((payload->>'total_tokens')::bigint), 0) AS tokens
+                        FROM audit_events
+                        WHERE api_key_id = $1 AND ts > now() - interval '1 day'
+                    ),
+                    reserved AS (
+                        SELECT
+                            COALESCE(SUM(estimated_usd), 0) AS usd,
+                            COALESCE(SUM(estimated_tokens), 0) AS tokens
+                        FROM budget_reservations
+                        WHERE api_key_id = $1 AND expires_at > now()
+                    )
                     SELECT
-                        COALESCE(SUM((payload->>'estimated_cost_usd')::numeric), 0) AS usd,
-                        COALESCE(SUM((payload->>'total_tokens')::bigint), 0) AS tokens
-                    FROM audit_events
-                    WHERE api_key_id = $1 AND ts > now() - interval '1 day'
+                        spent.usd + reserved.usd AS usd,
+                        spent.tokens + reserved.tokens AS tokens
+                    FROM spent, reserved
                     """,
                     api_key_id,
                 )
@@ -215,6 +252,94 @@ class PgBudgetStore:
         except Exception as exc:  # noqa: BLE001
             log.warning("budget lookup failed for %s: %s", api_key_id, exc)
         return 0.0, 0
+
+    async def try_reserve(
+        self,
+        api_key_id: str,
+        *,
+        usd_cap: Optional[float],
+        token_cap: Optional[int],
+        estimated_usd: float,
+        estimated_tokens: int,
+        ttl_seconds: int,
+    ) -> tuple[Optional[int], float, int]:
+        """Atomically check spend + reserved against caps and insert a
+        reservation iff the new request would still fit.
+
+        Returns (reservation_id, total_usd, total_tokens). reservation_id is
+        None when the cap was hit — total_* reflect the snapshot used for
+        the decision so callers can populate response headers.
+
+        Failure mode: fail-CLOSED. A DB error returns (None, 0, 0) which
+        the middleware treats as cap exceeded — same posture as the rate
+        limiter.
+        """
+        expires_at = datetime.now(tz=timezone.utc) + timedelta(seconds=max(1, ttl_seconds))
+        try:
+            async with self._store.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    WITH spent AS (
+                        SELECT
+                            COALESCE(SUM((payload->>'estimated_cost_usd')::numeric), 0) AS usd,
+                            COALESCE(SUM((payload->>'total_tokens')::bigint), 0) AS tokens
+                        FROM audit_events
+                        WHERE api_key_id = $1 AND ts > now() - interval '1 day'
+                    ),
+                    reserved AS (
+                        SELECT
+                            COALESCE(SUM(estimated_usd), 0) AS usd,
+                            COALESCE(SUM(estimated_tokens), 0) AS tokens
+                        FROM budget_reservations
+                        WHERE api_key_id = $1 AND expires_at > now()
+                    ),
+                    inserted AS (
+                        INSERT INTO budget_reservations (
+                            api_key_id, estimated_usd, estimated_tokens, expires_at
+                        )
+                        SELECT $1, $4, $5, $6
+                        FROM spent, reserved
+                        WHERE
+                            ($2::numeric IS NULL OR spent.usd + reserved.usd + $4 <= $2)
+                            AND ($3::bigint IS NULL OR spent.tokens + reserved.tokens + $5 <= $3)
+                        RETURNING id
+                    )
+                    SELECT
+                        spent.usd + reserved.usd AS total_usd,
+                        spent.tokens + reserved.tokens AS total_tokens,
+                        (SELECT id FROM inserted) AS reservation_id
+                    FROM spent, reserved
+                    """,
+                    api_key_id,
+                    usd_cap,
+                    token_cap,
+                    estimated_usd,
+                    estimated_tokens,
+                    expires_at,
+                )
+        except Exception as exc:  # noqa: BLE001 — fail-closed
+            log.warning("budget reserve failed for %s: %s", api_key_id, exc)
+            return None, 0.0, 0
+        if row is None:
+            return None, 0.0, 0
+        rid = row["reservation_id"]
+        return (
+            int(rid) if rid is not None else None,
+            float(row["total_usd"]),
+            int(row["total_tokens"]),
+        )
+
+    async def release(self, reservation_id: int) -> None:
+        """Drop a reservation. Idempotent: a missing row is a no-op (the
+        sweeper may have already collected it after a crash)."""
+        try:
+            async with self._store.pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM budget_reservations WHERE id = $1",
+                    int(reservation_id),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("budget release failed for id=%s: %s", reservation_id, exc)
 
 
 class PgIdempotencyStore:
